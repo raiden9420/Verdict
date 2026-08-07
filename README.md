@@ -40,6 +40,16 @@ graph TD
 
 ---
 
+## 🕸️ LangGraph State Machine
+
+Verdict heavily relies on **LangGraph** to orchestrate the adversarial debate as a structured, cyclic state graph rather than a loose chain of prompts.
+
+- **State Management**: The graph maintains a strict `AuditState` that tracks the unfolding transcript, parsed citations, confidence scores, and retry counts across multiple exchanges.
+- **Conditional Routing**: If an agent fabricates a citation (caught by the Validator node), the graph conditionally routes back to that agent, forcing a retry before proceeding to the Referee.
+- **Streaming Output**: As the graph traverses its nodes (Attacker → Defender → Validator → Referee), state updates are intercepted and streamed to the frontend via Server-Sent Events (SSE) in real-time.
+
+---
+
 ## 🚀 Features
 
 - **Multi-Agent Adversarial Debate**: Powered by LangGraph and Gemini.
