@@ -19,6 +19,7 @@ interface UseSSEResult {
   turns: Turn[];
   verdicts: Verdict[];
   debrief: DebriefCard | null;
+  skippedExchanges: number[];
   status: AuditStatus;
   connectionState: "live" | "reconnecting" | "polling" | "done";
   error: string | null;
@@ -28,6 +29,7 @@ export function useSSE(auditId: string | null): UseSSEResult {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [verdicts, setVerdicts] = useState<Verdict[]>([]);
   const [debrief, setDebrief] = useState<DebriefCard | null>(null);
+  const [skippedExchanges, setSkippedExchanges] = useState<number[]>([]);
   const [status, setStatus] = useState<AuditStatus>("in_progress");
   const [connectionState, setConnectionState] = useState<
     "live" | "reconnecting" | "polling" | "done"
@@ -132,6 +134,16 @@ export function useSSE(auditId: string | null): UseSSEResult {
       es.close();
     });
 
+    es.addEventListener("exchange_skipped", (e) => {
+      resetHeartbeat();
+      try {
+        const data = JSON.parse(e.data);
+        if (data.exchange_number != null) {
+          setSkippedExchanges((prev) => [...prev, data.exchange_number]);
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
     es.addEventListener("error", (e) => {
       // EventSource "error" can be a temporary reconnect or a fatal close
       if (es.readyState === EventSource.CLOSED) {
@@ -153,5 +165,5 @@ export function useSSE(auditId: string | null): UseSSEResult {
     };
   }, [auditId, resetHeartbeat, startPolling, stopPolling]);
 
-  return { turns, verdicts, debrief, status, connectionState, error };
+  return { turns, verdicts, debrief, skippedExchanges, status, connectionState, error };
 }

@@ -184,7 +184,7 @@ function OptionGroup({ label, value, setValue, options }: { label: string; value
 }
 
 function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief, onReport }: any) {
-  const { turns, verdicts, debrief, status, connectionState, error } = useSSE(auditId);
+  const { turns, verdicts, debrief, skippedExchanges, status, connectionState, error } = useSSE(auditId);
 
   const [highlightedPages, setHighlightedPages] = useState<number[]>([]);
 
@@ -230,15 +230,34 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
       <section className="debate-panel">
         <div className="panel-top"><span className="panel-title"><span className="live-bars"><i /><i /><i /></span> LIVE DEBATE</span><span>{status}</span></div>
         <div className="agent-feed">
-          {turns.map((turn, index) => (
-            <AgentMessage
-              key={turn.id || index}
-              role={turn.agent_type.toUpperCase()}
-              time={turn.created_at ? new Date(turn.created_at).toLocaleTimeString() : ''}
-              tone={turn.agent_type}
-              text={turn.content.critique_text || turn.content.rebuttal_text || turn.content.rationale || turn.content.claim_summary || ''}
-              cite={turn.content.cited_chunk_ids?.length ? 'Citations provided' : ''}
-            />
+          {turns.map((turn, index) => {
+            // Before rendering a turn, check if there's a skipped exchange
+            // that should appear before this turn's exchange_number
+            const skippedBefore = skippedExchanges.filter(
+              (n) => n === turn.exchange_number && turn.agent_type === 'attacker' && index > 0
+            );
+            return (
+              <span key={turn.id || index}>
+                <AgentMessage
+                  role={turn.agent_type.toUpperCase()}
+                  time={turn.created_at ? new Date(turn.created_at).toLocaleTimeString() : ''}
+                  tone={turn.agent_type}
+                  text={turn.content.critique_text || turn.content.rebuttal_text || turn.content.rationale || turn.content.claim_summary || ''}
+                  cite={turn.content.cited_chunk_ids?.length ? 'Citations provided' : ''}
+                />
+              </span>
+            );
+          })}
+          {/* Render skip notices for any exchanges that were skipped */}
+          {skippedExchanges.map((exchangeNum) => (
+            <article key={`skip-${exchangeNum}`} className="agent-message skipped">
+              <div className="message-meta">
+                <span className="agent-avatar">⊘</span>
+                <strong>EXCHANGE {exchangeNum} SKIPPED</strong>
+                <PTag variant="secondary">SKIPPED</PTag>
+              </div>
+              <p>This exchange was skipped — the Attacker couldn&apos;t produce a grounded critique after retries.</p>
+            </article>
           ))}
           {status === 'in_progress' && (
             <div className="typing"><span className="typing-avatar">AI</span><span>Agent is formulating a response</span><i /><i /><i /></div>

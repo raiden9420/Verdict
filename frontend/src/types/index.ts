@@ -119,7 +119,7 @@ export interface TurnsListResponse {
 // ---------------------------------------------------------------------------
 // SSE event types
 // ---------------------------------------------------------------------------
-export type SSEEventType = "turn" | "verdict" | "debrief" | "complete" | "error" | "heartbeat";
+export type SSEEventType = "turn" | "verdict" | "debrief" | "complete" | "error" | "heartbeat" | "exchange_skipped";
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -141,4 +141,5 @@ export interface AuditState {
   debrief?: DebriefCard;
   error?: string;
   highlightedPages: number[];
+  skippedExchanges: number[];
 }

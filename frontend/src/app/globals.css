@@ -891,6 +891,18 @@ button {
   background: var(--pds-surface);
 }
 
+.agent-message.skipped {
+  border-left-color: var(--pds-contrast-low);
+  border-left-style: dashed;
+  background: var(--pds-surface);
+  opacity: 0.75;
+}
+
+.skipped .agent-avatar {
+  background: var(--pds-contrast-low);
+  font-size: 13px;
+}
+
 .message-meta {
   display: flex;
   align-items: center;

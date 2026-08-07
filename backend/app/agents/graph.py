@@ -70,6 +70,11 @@ class AuditState(TypedDict):
     defender_validation: list
     attacker_valid: bool
 
+    # Retry context — populated when attacker citations fail validation,
+    # so the retried attacker call knows what went wrong.
+    last_failed_critique: dict
+    last_failure_reason: str
+
     # SSE streaming callback: Callable[[dict], None] or None
     event_callback: Any
 
@@ -200,10 +205,26 @@ def attacker_node(state: AuditState) -> dict:
         if state["prior_claims"]
         else "(none yet)"
     )
+    # If this is a retry after a failed citation validation, include
+    # context about the rejected attempt so the LLM can course-correct.
+    retry_section = ""
+    if state["attacker_retries"] > 0 and state.get("last_failed_critique"):
+        failed = state["last_failed_critique"]
+        reason = state.get("last_failure_reason", "Unknown validation failure")
+        retry_section = (
+            f"## ⚠️ Previous Attempt Rejected\n\n"
+            f"Your last critique was rejected because its citations failed "
+            f"grounding validation. Do NOT repeat this critique or use the "
+            f"same citations.\n\n"
+            f"**Rejected critique:** {failed.get('critique_text', '')}\n\n"
+            f"**Failure reason:** {reason}\n\n"
+        )
+
     user_prompt = (
         f"## Retrieved Paper Excerpts\n\n{chunk_text}\n\n"
         f"## Claims Already Raised This Round (DO NOT REPEAT)\n\n{prior}\n\n"
-        f"Now identify the single most significant NEW weakness."
+        + retry_section
+        + f"Now identify the single most significant NEW weakness."
     )
 
     system = attacker_system_prompt(state["round_topic_name"], state["round_topic"])
@@ -315,6 +336,30 @@ def validator_node(state: AuditState) -> dict:
         state["event_callback"],
     )
 
+    # Build retry context when attacker citations fail, so the retried
+    # attacker call knows what went wrong and can course-correct.
+    retry_context: dict = {}
+    if not attacker_all_valid:
+        # Build a human-readable failure reason from validation results
+        failure_parts = []
+        for v in attacker_val:
+            cid = v.get("chunk_id", "unknown")
+            score = v.get("similarity_score", 0.0)
+            if not v.get("valid"):
+                if cid is None:
+                    failure_parts.append(
+                        "No citations were provided for a non-omission critique"
+                    )
+                else:
+                    failure_parts.append(
+                        f"chunk {cid} — similarity {score:.3f} "
+                        f"(below threshold)"
+                    )
+        retry_context = {
+            "last_failed_critique": state["attacker_output"],
+            "last_failure_reason": "; ".join(failure_parts) if failure_parts else "Citation validation failed",
+        }
+
     return {
         "attacker_validation": attacker_val,
         "defender_validation": defender_val,
@@ -325,6 +370,7 @@ def validator_node(state: AuditState) -> dict:
         # this is what route_after_validation checks to decide
         # whether to retry or skip the exchange.
         "attacker_retries": state["attacker_retries"] + (0 if attacker_all_valid else 1),
+        **retry_context,
     }
 
 
@@ -406,6 +452,9 @@ def referee_node(state: AuditState) -> dict:
         "exchange_number": state["exchange_number"] + 1,
         "attacker_retries": 0,  # reset for next exchange
         "sequence_counter": seq + 1,
+        # Clear retry context for the next exchange
+        "last_failed_critique": {},
+        "last_failure_reason": "",
     }
 
 
@@ -414,13 +463,30 @@ def referee_node(state: AuditState) -> dict:
 # ---------------------------------------------------------------------------
 def skip_exchange_node(state: AuditState) -> dict:
     """Increment exchange counter when attacker can't produce valid cites."""
+    exchange = state["exchange_number"]
     logger.warning(
         "Exchange %d skipped — attacker citations failed validation",
-        state["exchange_number"],
+        exchange,
     )
+
+    # Push an SSE event so the frontend can display a skip notice
+    # instead of a mysterious gap in exchange numbers.
+    callback = state.get("event_callback")
+    if callback:
+        try:
+            callback({
+                "type": "exchange_skipped",
+                "data": {"exchange_number": exchange},
+            })
+        except Exception:
+            logger.warning("SSE callback failed for exchange_skipped")
+
     return {
-        "exchange_number": state["exchange_number"] + 1,
+        "exchange_number": exchange + 1,
         "attacker_retries": 0,
+        # Clear retry context for the next exchange
+        "last_failed_critique": {},
+        "last_failure_reason": "",
     }
 
 
@@ -639,6 +705,8 @@ def run_audit(
         "attacker_validation": [],
         "defender_validation": [],
         "attacker_valid": True,
+        "last_failed_critique": {},
+        "last_failure_reason": "",
         "event_callback": event_callback,
         "status": "in_progress",
         "error": "",

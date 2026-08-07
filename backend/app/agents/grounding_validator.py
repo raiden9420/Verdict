@@ -86,9 +86,21 @@ def validate_attacker_citations(
 
     chunk_ids = attacker_output.get("cited_chunk_ids", [])
     if not chunk_ids:
-        # No citations provided even though it's not an omission
-        logger.info("Attacker provided no citations (non-omission) — skipping")
-        return []
+        # Non-omission critique MUST cite at least one chunk.
+        # Return a synthetic failure so the validator_node marks this invalid
+        # and the retry/skip routing in graph.py kicks in.
+        logger.warning(
+            "Attacker provided no citations for non-omission critique "
+            "(type=%s) — marking invalid",
+            attacker_output.get("critique_type", "unknown"),
+        )
+        return [{
+            "chunk_id": None,
+            "valid": False,
+            "similarity_score": 0.0,
+            "chunk_text": None,
+            "page_number": None,
+        }]
 
     claim = attacker_output.get("critique_text", "")
     results = []
