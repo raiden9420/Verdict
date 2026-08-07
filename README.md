@@ -1,8 +1,8 @@
 # Verdict — Adversarial Research Audit System
 
-A powerful web application that audits research papers through a structured, turn-based debate between three AI personas: an **Attacker** (skeptical reviewer), a **Defender** (author advocate), and a **Referee** (adjudicator). 
+**Verdict** is an autonomous adversarial audit system designed to rigorously stress-test research papers. Instead of relying on passive LLM summaries—which are notoriously prone to confirmation bias and hallucinated citations—Verdict orchestrates a brutal, multi-agent debate directly against the source text. 
 
-Unlike standard single-pass LLM summaries that suffer from confirmation bias and hallucinated citations, Verdict enforces a brutal, deterministic critique where every claim must be backed by a programmatic citation check against the paper's actual text.
+By pitting a skeptical **Attacker** against an author-advocating **Defender** and adjudicating their exchanges through an impartial **Referee**, Verdict extracts actionable flaws, solidifies verifiable facts, and enforces strict, deterministic citation validation on every single claim.
 
 ---
 
