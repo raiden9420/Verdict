@@ -4,7 +4,7 @@ import { PorscheDesignSystemProvider } from '@porsche-design-system/components-r
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <PorscheDesignSystemProvider theme="light">
+    <PorscheDesignSystemProvider>
       {children}
     </PorscheDesignSystemProvider>
   );
