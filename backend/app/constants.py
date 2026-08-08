@@ -23,10 +23,11 @@ CHUNK_OVERLAP_WORDS = 50      # overlap between consecutive chunks
 TOP_K_RETRIEVAL = 5           # chunks returned per similarity search
 
 # ---------------------------------------------------------------------------
-# Embeddings
+# Embeddings (Gemini API — no local model, no PyTorch)
 # ---------------------------------------------------------------------------
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-EMBEDDING_DIMENSION = 384
+EMBEDDING_MODEL_NAME = "gemini-embedding-001"
+EMBEDDING_DIMENSION = 384     # output_dimensionality sent to Gemini API;
+                              # matches existing Supabase vector(384) column
 
 # ---------------------------------------------------------------------------
 # Grounding validation
