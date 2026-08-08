@@ -10,7 +10,7 @@ import json
 import logging
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 
 from app.api.dependencies import get_session_id
 from app.database import get_supabase
@@ -19,7 +19,6 @@ from app.services.pdf_service import (
     validate_and_parse_pdf,
     chunk_pages,
     PDFValidationError,
-    UPLOAD_DIR,
 )
 from app.services.embedding_service import embed_batch
 
@@ -110,13 +109,13 @@ async def upload_paper(
 
 @router.get("/papers/{paper_id}/pdf")
 async def serve_pdf(paper_id: str):
-    """Serve the raw PDF file for the Document Viewer."""
-    filepath = UPLOAD_DIR / f"{paper_id}.pdf"
-    if not filepath.exists():
+    """Serve the raw PDF file for the Document Viewer by redirecting to Supabase Storage."""
+    supabase = get_supabase()
+    paper = supabase.table("papers").select("storage_path").eq("id", paper_id).execute()
+    if not paper.data:
         raise HTTPException(status_code=404, detail="PDF not found")
-    return FileResponse(
-        str(filepath),
-        media_type="application/pdf",
-        filename=f"{paper_id}.pdf",
-        content_disposition_type="inline",
-    )
+
+    storage_path = paper.data[0]["storage_path"]
+    url = supabase.storage.from_("papers").get_public_url(storage_path)
+
+    return RedirectResponse(url)

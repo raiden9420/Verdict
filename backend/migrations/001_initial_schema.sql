@@ -149,5 +149,13 @@ ALTER TABLE chunks DISABLE ROW LEVEL SECURITY;
 ALTER TABLE audits DISABLE ROW LEVEL SECURITY;
 ALTER TABLE rounds DISABLE ROW LEVEL SECURITY;
 ALTER TABLE turns DISABLE ROW LEVEL SECURITY;
-ALTER TABLE verdicts DISABLE ROW LEVEL SECURITY;
 ALTER TABLE debrief_cards DISABLE ROW LEVEL SECURITY;
+
+-- ---------------------------------------------------------------------------
+-- Storage
+-- ---------------------------------------------------------------------------
+-- Create 'papers' bucket for PDF storage (requires supabase storage extension, which is built-in)
+INSERT INTO storage.buckets (id, name, public) VALUES ('papers', 'papers', true) ON CONFLICT DO NOTHING;
+
+-- Allow public access to the 'papers' bucket for Phase 1
+CREATE POLICY "Public Access" ON storage.objects FOR ALL USING (bucket_id = 'papers') WITH CHECK (bucket_id = 'papers');

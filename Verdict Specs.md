@@ -270,3 +270,79 @@ A user can, without an account:
 4. Receive an end-of-round Debrief Card, generated as its own synthesis step (§7.6) after the 3rd exchange.
 5. Get an immediate, clear error when uploading an oversized or scanned/image-only PDF, instead of a silent failure.
 6. All of the above running end-to-end on the free-tier stack listed in §9, reachable at a public URL.
+
+---
+
+## 14. Phase 2 — Technical Specification
+
+**Prerequisite:** Phase 2 assumes the Phase 1 review fixes are already applied (correct `google-genai` package, a verified Gemini model string, the closed Attacker validation loophole, and PDF storage moved off local disk). Everything below builds on a working Phase 1 — it does not touch the core 4-node debate loop, the fixed 3-exchange round, or the single-topic picker. Those stay exactly as built.
+
+### 14.1 Statistical Rigor round (6th topic)
+
+Add a sixth fixed round topic, extending §3.3's table:
+
+| # | Topic | Slug | What it probes |
+|---|---|---|---|
+| 6 | Statistical Rigor | `statistical_rigor` | Are p-values, sample sizes, effect sizes, and multiple-comparison corrections handled correctly, and does reported significance actually support the claims made? |
+
+This is a drop-in addition to the existing `ROUND_TOPICS` / `TOPIC_ATTACK_FRAMING` pattern from `constants.py` — no new agent or graph logic required, just a new dict entry plus a matching Attacker framing string and a new option in the frontend's round-topic picker.
+
+### 14.2 External literature grounding
+
+The Attacker gains the ability to search external literature — but only for the two topics where it's actually useful: `novelty_scope` (checking for unstated prior art) and `experimental_setup` (checking for missing standard baselines). The other four topics — including the new `statistical_rigor` — stay in-document-only. This is a deliberate scope boundary, not an oversight.
+
+**Design:** rather than giving the Attacker live tool-calling (extra LLM round-trips, more free-tier rate-limit pressure), use a two-step deterministic-then-generate pattern consistent with how in-document retrieval already works:
+1. Build a search query from the round topic + the paper's own abstract/intro chunk (a simple heuristic extraction is enough — don't add a new LLM persona just for this).
+2. Execute the search against external APIs deterministically, in the backend, no LLM involved.
+3. Inject the formatted results into the Attacker's context alongside the usual in-document chunks, the same way retrieved chunks already are.
+
+**External sources (free, no cost — query in parallel, merge, de-duplicate by title):**
+- **Semantic Scholar Graph API** — `GET https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={n}&fields=title,abstract,authors,year,url,externalIds`. No key required at Phase 2's usage level (roughly 100 requests/5 min unauthenticated).
+- **arXiv API** — `GET http://export.arxiv.org/api/query?search_query=all:{q}&max_results={n}`, Atom XML response — use the `feedparser` package rather than hand-rolling XML parsing.
+- **OpenAlex** — `GET https://api.openalex.org/works?search={q}&per-page={n}`. Fully open, no key. OpenAlex stores abstracts as an `abstract_inverted_index` (word→position mapping) rather than plain text — write a small helper to reconstruct plain text from it. Add a `mailto` query param (configurable via env var) to get OpenAlex's better-rate-limited "polite pool."
+
+**Caching:** cache search results in-process (a dict or `functools.lru_cache` keyed by normalized query string is sufficient — no new database table needed).
+
+**Citation type + validation:** external citations can't be checked against a local chunk. Add a new validator function that checks *existence* rather than semantic grounding — confirm the cited external work actually appeared in that search call's results, catching a fabricated title/author. Verifying the external paper's full content is out of scope. Store external citations as a JSON field on the Attacker's turn content (e.g. `external_citations: [{title, authors, year, url, source}]`) — no new table needed, `turns.content` is already JSONB.
+
+### 14.3 Novelty / overlap detection
+
+For the `novelty_scope` topic specifically, after the external search in §14.2 returns candidates, compute embedding similarity (reuse the existing local `sentence-transformers` model) between the paper's own abstract and each candidate's abstract. Surface the top 2–3 most similar external works with their similarity scores to the Attacker — this turns a vague "not novel enough" critique into a specific, checkable one ("this closely overlaps with [X], similarity 0.81").
+
+### 14.4 Reproducibility signals
+
+A new deterministic (non-LLM) service that scans a paper's chunks for concrete disclosure signals: code/repository links, dataset availability statements, hyperparameter disclosure, compute/hardware disclosure, and random-seed disclosure. Run once at paper ingestion time (cheap, no LLM cost) and store the result as a JSONB column on `papers` (`reproducibility_signals`). Surface it to the Attacker as extra context when `reproducibility` is the selected topic, and add it as a structured checklist field on the Debrief Card whenever that topic is audited.
+
+### 14.5 Multi-provider LLM router
+
+Add `GroqClient` and `OpenRouterClient` as additional subclasses of the existing `LLMClient` ABC — both are OpenAI-compatible APIs and can share most request/response handling plus the existing JSON-repair fallback logic. Add a router that tries providers in a fixed order (Gemini → Groq → OpenRouter), falling back only when the current provider's retries are exhausted due to rate-limiting — not for malformed JSON, which keeps retrying within the same provider first. Each provider's API key is a separate optional env var; if unset, the router skips that provider rather than erroring, so providers can be added incrementally.
+
+### 14.6 Self-consistency re-runs
+
+When the Referee returns a verdict with `confidence` below a new `SELF_CONSISTENCY_THRESHOLD` (start at `0.5`), re-run just the Referee adjudication once more with identical inputs. If the second verdict agrees, keep it. If they disagree, force the verdict to `CONTESTED` and note in the rationale that independent adjudications disagreed — that disagreement is itself informative. This only doubles Referee calls for already-uncertain exchanges, not every exchange.
+
+### 14.7 Data model additions
+
+| Change | Details |
+|---|---|
+| `papers.reproducibility_signals` | New `JSONB` column, populated at ingestion (§14.4) |
+| `turns.content` (attacker rows) | May now include an `external_citations` array — no schema change, already JSONB |
+| `ROUND_TOPICS` / `TOPIC_ATTACK_FRAMING` | New `statistical_rigor` entry (§14.1) |
+
+No new tables are required for Phase 2.
+
+### 14.8 Non-functional notes
+
+- Identify your app in external API requests where the provider supports it (e.g. OpenAlex's `mailto` param), and respect each API's documented rate limits independently of the existing Gemini rate-limit handling.
+- External calls add real wall-clock time on top of Phase 1's budget — relax the "well under 5 minutes" target from §11 to **well under 10 minutes** for a `novelty_scope` or `experimental_setup` audit that includes external search.
+
+---
+
+## 15. Definition of Done — Phase 2
+
+Building on Phase 1 (§13, still required), a user can additionally:
+1. Select "Statistical Rigor" as a round topic and get a debate grounded in that framing.
+2. Select "Novelty, Scope & Problem Formulation" or "Experimental Setup" and see at least one Attacker critique reference real external literature, rendered distinctly from in-document citations, with the cited work's existence validated rather than just asserted.
+3. Select "Reproducibility" and see the reproducibility checklist populated on the Debrief Card.
+4. Get a coherent result even if the Gemini free tier is exhausted mid-audit, via automatic fallback to a second configured provider.
+5. See at least one `CONTESTED` verdict in testing that resulted from a self-consistency disagreement, if you can trigger one — confirming low-confidence verdicts are actually double-checked, not just labeled.

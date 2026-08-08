@@ -16,12 +16,9 @@ from app.constants import (
     CHUNK_SIZE_WORDS,
     CHUNK_OVERLAP_WORDS,
 )
+from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
-
-# Uploaded PDFs are stored here and served by FastAPI as static files.
-UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 class PDFValidationError(Exception):
@@ -88,15 +85,21 @@ def validate_and_parse_pdf(
             "(OCR is not supported.)"
         )
 
-    # ---- persist file ----
-    filepath = UPLOAD_DIR / f"{paper_id}.pdf"
-    filepath.write_bytes(file_bytes)
-    logger.info("Saved PDF %s (%d pages) → %s", filename, doc.page_count, filepath)
+    # ---- persist file to Supabase Storage ----
+    storage_path = f"{paper_id}.pdf"
+    supabase = get_supabase()
+    
+    supabase.storage.from_("papers").upload(
+        file=file_bytes,
+        path=storage_path,
+        file_options={"content-type": "application/pdf"}
+    )
+    logger.info("Saved PDF %s (%d pages) to Supabase storage → %s", filename, doc.page_count, storage_path)
 
     return {
         "pages": pages,
         "page_count": doc.page_count,
-        "filepath": str(filepath),
+        "filepath": storage_path,
     }
 
 
