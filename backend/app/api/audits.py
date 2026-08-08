@@ -318,10 +318,26 @@ async def get_debrief(audit_id: str):
             except (json.JSONDecodeError, TypeError):
                 d[field] = []
 
+    # Fetch paper_id and topic to attach reproducibility_checklist if relevant
+    reproducibility_checklist = None
+    try:
+        audit_res = supabase.table("audits").select("paper_id, round_topic").eq("id", audit_id).execute()
+        if audit_res.data:
+            paper_id = audit_res.data[0].get("paper_id")
+            topic = audit_res.data[0].get("round_topic")
+            if topic == "reproducibility" and paper_id:
+                paper_res = supabase.table("papers").select("reproducibility_signals").eq("id", paper_id).execute()
+                if paper_res.data and paper_res.data[0].get("reproducibility_signals"):
+                    reproducibility_checklist = paper_res.data[0]["reproducibility_signals"]
+    except Exception as exc:
+        logger.warning("Could not fetch reproducibility checklist for debrief: %s", exc)
+
     return DebriefCardResponse(
         id=d["id"],
         executive_synthesis=d.get("executive_synthesis"),
         solidified_strengths=d.get("solidified_strengths"),
         actionable_weaknesses=d.get("actionable_weaknesses"),
         contested_points=d.get("contested_points"),
+        reproducibility_checklist=reproducibility_checklist,
     )
+

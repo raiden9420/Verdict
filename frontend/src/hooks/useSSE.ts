@@ -20,6 +20,7 @@ interface UseSSEResult {
   verdicts: Verdict[];
   debrief: DebriefCard | null;
   skippedExchanges: number[];
+  processMessage: string | null;
   status: AuditStatus;
   connectionState: "live" | "reconnecting" | "polling" | "done";
   error: string | null;
@@ -30,6 +31,7 @@ export function useSSE(auditId: string | null): UseSSEResult {
   const [verdicts, setVerdicts] = useState<Verdict[]>([]);
   const [debrief, setDebrief] = useState<DebriefCard | null>(null);
   const [skippedExchanges, setSkippedExchanges] = useState<number[]>([]);
+  const [processMessage, setProcessMessage] = useState<string | null>(null);
   const [status, setStatus] = useState<AuditStatus>("in_progress");
   const [connectionState, setConnectionState] = useState<
     "live" | "reconnecting" | "polling" | "done"
@@ -55,6 +57,7 @@ export function useSSE(auditId: string | null): UseSSEResult {
           stopPolling();
           setStatus("completed");
           setConnectionState("done");
+          setProcessMessage(null);
           // Fetch debrief
           try {
             const d = await fetchDebrief(auditId);
@@ -66,6 +69,7 @@ export function useSSE(auditId: string | null): UseSSEResult {
           stopPolling();
           setStatus("error");
           setConnectionState("done");
+          setProcessMessage(null);
           setError("Audit failed");
         }
       } catch {
@@ -106,6 +110,7 @@ export function useSSE(auditId: string | null): UseSSEResult {
 
     es.addEventListener("turn", (e) => {
       resetHeartbeat();
+      setProcessMessage(null);
       try {
         const turn: Turn = JSON.parse(e.data);
         setTurns((prev) => [...prev, turn]);
@@ -120,8 +125,19 @@ export function useSSE(auditId: string | null): UseSSEResult {
       } catch { /* ignore */ }
     });
 
+    es.addEventListener("process_update", (e) => {
+      resetHeartbeat();
+      try {
+        const data = JSON.parse(e.data);
+        if (data.message) {
+          setProcessMessage(data.message);
+        }
+      } catch { /* ignore */ }
+    });
+
     es.addEventListener("debrief", (e) => {
       resetHeartbeat();
+      setProcessMessage(null);
       try {
         const d: DebriefCard = JSON.parse(e.data);
         setDebrief(d);
@@ -131,6 +147,7 @@ export function useSSE(auditId: string | null): UseSSEResult {
     es.addEventListener("complete", () => {
       setStatus("completed");
       setConnectionState("done");
+      setProcessMessage(null);
       es.close();
     });
 
@@ -165,5 +182,6 @@ export function useSSE(auditId: string | null): UseSSEResult {
     };
   }, [auditId, resetHeartbeat, startPolling, stopPolling]);
 
-  return { turns, verdicts, debrief, skippedExchanges, status, connectionState, error };
+  return { turns, verdicts, debrief, skippedExchanges, processMessage, status, connectionState, error };
 }
+

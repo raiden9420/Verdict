@@ -184,9 +184,9 @@ function OptionGroup({ label, value, setValue, options }: { label: string; value
 }
 
 function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief, onReport }: any) {
-  const { turns, verdicts, debrief, skippedExchanges, status, connectionState, error } = useSSE(auditId);
+  const { turns, verdicts, debrief, skippedExchanges, processMessage, status } = useSSE(auditId);
 
-  const [highlightedPages, setHighlightedPages] = useState<number[]>([]);
+  const [highlightedPages] = useState<number[]>([]);
 
   // Calculate highlighted pages based on turns (similar to old UI)
   const autoHighlightPages = useMemo(() => {
@@ -218,7 +218,7 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
 
   return <div className="arena-page">
     <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" /> LIVE AUDIT / IN PROGRESS</div><h1>Adversarial arena</h1></div><div className="header-actions"></div></div>
-    <div className="round-strip"><div className="round-progress"><span className="progress-complete" /><span className="progress-complete" /><span className="progress-active" /><span /><span /></div><div><strong>ROUND {String(activeRound + 1).padStart(2, '0')} OF 05</strong><span>Experimental setup</span></div><div></div></div>
+    <div className="round-strip"><div className="round-progress"><span className="progress-complete" /><span className="progress-complete" /><span className="progress-active" /><span /><span /></div><div><strong>ROUND {String(activeRound + 1).padStart(2, '0')} OF 06</strong><span>Audit Execution</span></div><div></div></div>
     <div className="arena-grid">
       <section className="document-panel">
         <DocumentViewer
@@ -230,20 +230,35 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
       <section className="debate-panel">
         <div className="panel-top"><span className="panel-title"><span className="live-bars"><i /><i /><i /></span> LIVE DEBATE</span><span>{status}</span></div>
         <div className="agent-feed">
+          {processMessage && (
+            <div style={{
+              padding: '0.65rem 0.9rem',
+              background: 'rgba(59, 130, 246, 0.1)',
+              border: '1px solid rgba(59, 130, 246, 0.3)',
+              borderRadius: '6px',
+              color: '#60a5fa',
+              fontSize: '0.85rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              margin: '0.5rem 0'
+            }}>
+              <span>🌐</span>
+              <span>{processMessage}</span>
+            </div>
+          )}
+
           {turns.map((turn, index) => {
-            // Before rendering a turn, check if there's a skipped exchange
-            // that should appear before this turn's exchange_number
-            const skippedBefore = skippedExchanges.filter(
-              (n) => n === turn.exchange_number && turn.agent_type === 'attacker' && index > 0
-            );
             return (
               <span key={turn.id || index}>
                 <AgentMessage
+                  turn={turn}
+                  allTurns={turns}
                   role={turn.agent_type.toUpperCase()}
                   time={turn.created_at ? new Date(turn.created_at).toLocaleTimeString() : ''}
                   tone={turn.agent_type}
                   text={turn.content.critique_text || turn.content.rebuttal_text || turn.content.rationale || turn.content.claim_summary || ''}
-                  cite={turn.content.cited_chunk_ids?.length ? 'Citations provided' : ''}
+                  cite={turn.content.cited_chunk_ids?.length ? 'In-document Citations Provided' : ''}
                 />
               </span>
             );
@@ -269,14 +284,56 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
     <section className={`debrief-card ${showDebrief ? 'open' : ''}`}><button className="debrief-header" onClick={() => setShowDebrief(!showDebrief)}><span><PIcon name="chart" /><strong>Round debrief</strong>{debrief ? <PTag variant="success">Final</PTag> : <PTag variant="warning">Provisional</PTag>}</span><span className="debrief-toggle">{showDebrief ? 'Collapse' : 'Expand'} <PIcon name={showDebrief ? 'arrow-up' : 'arrow-down'} /></span></button>{showDebrief && <div className="debrief-body">
       <div className="synthesis"><span className="small-muted">EXECUTIVE SYNTHESIS</span><p>{debrief?.executive_synthesis || 'Debrief will be generated at the end of the round.'}</p></div>
       {debrief?.reproducibility_checklist && (
-        <div className="reproducibility-checklist" style={{ margin: '1rem 0', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.1)' }}>
-          <span className="small-muted" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>REPRODUCIBILITY CHECKLIST (DETERMINISTIC SCAN)</span>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.85rem' }}>
-            <div>Code: <strong>{debrief.reproducibility_checklist.code_available ? '✓ Disclosed' : '✗ Missing'}</strong></div>
-            <div>Data: <strong>{debrief.reproducibility_checklist.data_available ? '✓ Disclosed' : '✗ Missing'}</strong></div>
-            <div>Hyperparameters: <strong>{debrief.reproducibility_checklist.hyperparameters_disclosed ? '✓ Disclosed' : '✗ Missing'}</strong></div>
-            <div>Compute / Hardware: <strong>{debrief.reproducibility_checklist.compute_disclosed ? '✓ Disclosed' : '✗ Missing'}</strong></div>
-            <div>Random Seed: <strong>{debrief.reproducibility_checklist.seed_disclosed ? '✓ Disclosed' : '✗ Missing'}</strong></div>
+        <div className="reproducibility-checklist" style={{ margin: '1rem 0', padding: '0.85rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+          <span className="small-muted" style={{ display: 'block', marginBottom: '0.6rem', fontWeight: 600, color: '#e5e7eb', letterSpacing: '0.05em' }}>
+            📋 REPRODUCIBILITY CHECKLIST (DETERMINISTIC INGESTION SCAN)
+          </span>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem', fontSize: '0.85rem' }}>
+            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
+              <span>Code / Repository: </span>
+              <strong style={{ color: debrief.reproducibility_checklist.code_available ? '#4ade80' : '#f87171' }}>
+                {debrief.reproducibility_checklist.code_available ? '✓ Disclosed' : '✗ Missing'}
+              </strong>
+              {debrief.reproducibility_checklist.code_details?.length ? (
+                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.2rem' }}>
+                  {debrief.reproducibility_checklist.code_details.slice(0, 2).join(', ')}
+                </div>
+              ) : null}
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
+              <span>Dataset Availability: </span>
+              <strong style={{ color: debrief.reproducibility_checklist.data_available ? '#4ade80' : '#f87171' }}>
+                {debrief.reproducibility_checklist.data_available ? '✓ Disclosed' : '✗ Missing'}
+              </strong>
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
+              <span>Hyperparameters: </span>
+              <strong style={{ color: debrief.reproducibility_checklist.hyperparameters_disclosed ? '#4ade80' : '#f87171' }}>
+                {debrief.reproducibility_checklist.hyperparameters_disclosed ? '✓ Disclosed' : '✗ Missing'}
+              </strong>
+              {debrief.reproducibility_checklist.hyperparameter_details?.length ? (
+                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.2rem' }}>
+                  Disclosed: {debrief.reproducibility_checklist.hyperparameter_details.slice(0, 3).join(', ')}
+                </div>
+              ) : null}
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
+              <span>Compute / Hardware: </span>
+              <strong style={{ color: debrief.reproducibility_checklist.compute_disclosed ? '#4ade80' : '#f87171' }}>
+                {debrief.reproducibility_checklist.compute_disclosed ? '✓ Disclosed' : '✗ Missing'}
+              </strong>
+              {debrief.reproducibility_checklist.compute_details?.length ? (
+                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.2rem' }}>
+                  Disclosed: {debrief.reproducibility_checklist.compute_details.slice(0, 3).join(', ')}
+                </div>
+              ) : null}
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px', gridColumn: 'span 2' }}>
+              <span>Random Seed: </span>
+              <strong style={{ color: debrief.reproducibility_checklist.seed_disclosed ? '#4ade80' : '#f87171' }}>
+                {debrief.reproducibility_checklist.seed_disclosed ? '✓ Disclosed' : '✗ Missing'}
+              </strong>
+            </div>
           </div>
         </div>
       )}
@@ -294,7 +351,79 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
   </div>;
 }
 
-function AgentMessage({ role, time, tone, text, cite }: { role: string; time: string; tone: string; text: string; cite: string }) { return <article className={`agent-message ${tone}`}><div className="message-meta"><span className="agent-avatar">{role[0]}</span><strong>{role}</strong><span>{time}</span><PTag variant={tone === 'attacker' ? 'error' : tone === 'defender' ? 'success' : 'secondary'}>{tone === 'referee' ? 'RULING' : 'ARGUMENT'}</PTag></div><p>{text}</p>{cite && <div className="citation"><PIcon name="linked" /> {cite}</div>}</article>; }
+function AgentMessage({ turn, allTurns, role, time, tone, text, cite }: { turn?: Turn; allTurns?: Turn[]; role: string; time: string; tone: string; text: string; cite: string }) {
+  const validatorTurn = allTurns?.find(
+    (t) => t.agent_type === 'validator' && turn && t.exchange_number === turn.exchange_number
+  );
+  const externalValidations = validatorTurn?.content?.external_validations || [];
+
+  return (
+    <article className={`agent-message ${tone}`}>
+      <div className="message-meta">
+        <span className="agent-avatar">{role[0]}</span>
+        <strong>{role}</strong>
+        <span>{time}</span>
+        <PTag variant={tone === 'attacker' ? 'error' : tone === 'defender' ? 'success' : 'secondary'}>
+          {tone === 'referee' ? 'RULING' : 'ARGUMENT'}
+        </PTag>
+      </div>
+
+      <p>{text}</p>
+
+      {/* Indicator when external literature search was run */}
+      {turn?.content?.external_search_performed && (
+        <div style={{ margin: '0.5rem 0', fontSize: '0.8rem', color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <span>🌐</span>
+          <span>External literature search executed across Semantic Scholar, arXiv, & OpenAlex ({turn.content.external_candidate_count ?? 0} candidates retrieved)</span>
+        </div>
+      )}
+
+      {/* External Literature Citations with Existence Validation Status */}
+      {turn?.content?.external_citations && turn.content.external_citations.length > 0 && (
+        <div style={{ marginTop: '0.75rem', padding: '0.65rem 0.8rem', background: 'rgba(0,0,0,0.25)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#9ca3af', letterSpacing: '0.05em', textTransform: 'uppercase', display: 'block', marginBottom: '0.4rem' }}>
+            📚 Cited External Literature & Existence Validation
+          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+            {turn.content.external_citations.map((ext, idx) => {
+              const valMatch = externalValidations.find(
+                (v) => v.title && ext.title && (v.title.toLowerCase().includes(ext.title.toLowerCase()) || ext.title.toLowerCase().includes(v.title.toLowerCase()))
+              );
+              const isValid = valMatch ? valMatch.valid : true;
+              return (
+                <div key={idx} style={{ fontSize: '0.82rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.65rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: '200px' }}>
+                    <div style={{ fontWeight: 600, color: '#f3f4f6' }}>
+                      {ext.url ? <a href={ext.url} target="_blank" rel="noreferrer" style={{ color: '#93c5fd', textDecoration: 'underline' }}>{ext.title}</a> : ext.title}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
+                      {ext.authors?.join(', ')} {ext.year ? `(${ext.year})` : ''} {ext.source ? `• ${ext.source}` : ''}
+                      {ext.similarity_score != null ? ` • Overlap Similarity: ${Math.round(ext.similarity_score * 100)}%` : ''}
+                    </div>
+                  </div>
+                  <div>
+                    {isValid ? (
+                      <span style={{ fontSize: '0.72rem', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 600 }}>
+                        ✓ EXISTENCE VERIFIED
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: '0.72rem', background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 600 }}>
+                        ✕ UNVERIFIED CITATION
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {cite && <div className="citation"><PIcon name="linked" /> {cite}</div>}
+    </article>
+  );
+}
+
 
 function ReportView({ onBack }: { onBack: () => void }) {
   const rounds = [

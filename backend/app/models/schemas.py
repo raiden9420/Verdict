@@ -75,6 +75,8 @@ class DebriefCardResponse(BaseModel):
     solidified_strengths: Optional[list] = None
     actionable_weaknesses: Optional[list] = None
     contested_points: Optional[list] = None
+    reproducibility_checklist: Optional[dict] = None
+
 
 
 # ---------------------------------------------------------------------------

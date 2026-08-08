@@ -252,9 +252,21 @@ def attacker_node(state: AuditState) -> dict:
     external_lit_section = ""
     ext_search_results: list = []
     if state["round_topic"] in ("novelty_scope", "experimental_setup"):
+        callback = state.get("event_callback")
+        if callback:
+            try:
+                callback({
+                    "type": "process_update",
+                    "data": {
+                        "message": "Querying Semantic Scholar, arXiv, & OpenAlex in parallel...",
+                        "process": "literature_search_start",
+                        "topic": state["round_topic"],
+                    },
+                })
+            except Exception:
+                pass
         try:
             first_chunk_text = chunks[0]["text"] if chunks else ""
-            # Extract simple search query from first chunk or topic name
             query_words = first_chunk_text.split()[:20]
             search_query = " ".join(query_words) if query_words else state["round_topic_name"]
 
@@ -264,6 +276,20 @@ def attacker_node(state: AuditState) -> dict:
                 ext_search_results = rank_candidates_by_novelty_overlap(
                     first_chunk_text, ext_search_results, top_k=3
                 )
+
+            if callback:
+                try:
+                    callback({
+                        "type": "process_update",
+                        "data": {
+                            "message": f"Found {len(ext_search_results)} candidate external papers across Semantic Scholar, arXiv, & OpenAlex",
+                            "process": "literature_search_complete",
+                            "topic": state["round_topic"],
+                            "count": len(ext_search_results),
+                        },
+                    })
+                except Exception:
+                    pass
 
             if ext_search_results:
                 cand_strings = []
@@ -308,6 +334,12 @@ def attacker_node(state: AuditState) -> dict:
     output.setdefault("cited_chunk_ids", [])
     output.setdefault("external_citations", [])
     output.setdefault("critique_type", "inconsistency")
+
+    if state["round_topic"] in ("novelty_scope", "experimental_setup"):
+        output["external_search_performed"] = True
+        output["external_sources"] = ["Semantic Scholar", "arXiv", "OpenAlex"]
+        output["external_candidate_count"] = len(ext_search_results)
+
 
     seq = state["sequence_counter"]
     turn = _store_turn(

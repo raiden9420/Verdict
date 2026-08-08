@@ -62,12 +62,31 @@ export interface AuditCreateResponse {
   status: string;
 }
 
+export interface ExternalCitation {
+  title: string;
+  authors?: string[];
+  year?: number | string;
+  url?: string;
+  source?: string;
+  similarity_score?: number;
+}
+
+export interface ExternalValidationResult {
+  title: string;
+  valid: boolean;
+  source?: string;
+}
+
 export interface TurnContent {
   // Attacker fields
   claim_summary?: string;
   critique_text?: string;
   cited_chunk_ids?: string[];
   critique_type?: string;
+  external_citations?: ExternalCitation[];
+  external_search_performed?: boolean;
+  external_sources?: string[];
+  external_candidate_count?: number;
   // Defender fields
   rebuttal_text?: string;
   concedes?: boolean;
@@ -78,6 +97,7 @@ export interface TurnContent {
   // Validator fields
   attacker_validations?: ValidationResult[];
   defender_validations?: ValidationResult[];
+  external_validations?: ExternalValidationResult[];
   attacker_citations_valid?: boolean;
 }
 
@@ -130,7 +150,6 @@ export interface DebriefCard {
   reproducibility_checklist?: ReproducibilitySignals;
 }
 
-
 export interface TurnsListResponse {
   turns: Turn[];
   verdicts: Verdict[];
@@ -140,7 +159,8 @@ export interface TurnsListResponse {
 // ---------------------------------------------------------------------------
 // SSE event types
 // ---------------------------------------------------------------------------
-export type SSEEventType = "turn" | "verdict" | "debrief" | "complete" | "error" | "heartbeat" | "exchange_skipped";
+export type SSEEventType = "turn" | "verdict" | "debrief" | "complete" | "error" | "heartbeat" | "exchange_skipped" | "process_update";
+
 
 export interface SSEEvent {
   type: SSEEventType;
