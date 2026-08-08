@@ -21,9 +21,11 @@ from app.services.pdf_service import (
     PDFValidationError,
 )
 from app.services.embedding_service import embed_batch
+from app.services.reproducibility_service import scan_paper_reproducibility
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["papers"])
+
 
 
 @router.post(
@@ -64,14 +66,29 @@ async def upload_paper(
     texts = [c["text"] for c in chunks]
     embeddings = embed_batch(texts)
 
+    # ---- Scan reproducibility signals ----
+    reproducibility_signals = scan_paper_reproducibility(parsed["pages"])
+
     # ---- Store paper ----
     supabase = get_supabase()
-    supabase.table("papers").insert({
+    paper_data = {
         "id": paper_id,
         "filename": file.filename or "upload.pdf",
         "storage_path": parsed["filepath"],
         "page_count": parsed["page_count"],
-    }).execute()
+        "reproducibility_signals": reproducibility_signals,
+    }
+    try:
+        supabase.table("papers").insert(paper_data).execute()
+    except Exception as exc:
+        if "reproducibility_signals" in str(exc):
+            logger.warning("Supabase table missing reproducibility_signals column, retrying insert without it: %s", exc)
+            paper_data.pop("reproducibility_signals", None)
+            supabase.table("papers").insert(paper_data).execute()
+        else:
+            raise
+
+
 
     # ---- Store chunks with embeddings ----
     chunk_rows = []

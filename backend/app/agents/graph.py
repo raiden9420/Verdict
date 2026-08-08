@@ -22,7 +22,9 @@ from app.constants import (
     EXCHANGES_PER_ROUND,
     MAX_ATTACKER_RETRIES,
     ROUND_TOPICS,
+    SELF_CONSISTENCY_THRESHOLD,
 )
+
 from app.database import get_supabase
 from app.services.llm_client import get_llm_client
 from app.services.retrieval_service import (
@@ -39,7 +41,13 @@ from app.agents.prompts import (
 from app.agents.grounding_validator import (
     validate_attacker_citations,
     validate_defender_citations,
+    validate_external_citations,
 )
+from app.services.literature_search_service import (
+    search_external_literature,
+    rank_candidates_by_novelty_overlap,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +76,10 @@ class AuditState(TypedDict):
     defender_output: dict
     attacker_validation: list
     defender_validation: list
+    external_search_results: list
+    external_validation: list
     attacker_valid: bool
+
 
     # Retry context — populated when attacker citations fail validation,
     # so the retried attacker call knows what went wrong.
@@ -220,9 +231,70 @@ def attacker_node(state: AuditState) -> dict:
             f"**Failure reason:** {reason}\n\n"
         )
 
+    reproducibility_section = ""
+    if state["round_topic"] == "reproducibility":
+        try:
+            supabase = get_supabase()
+            paper_res = supabase.table("papers").select("reproducibility_signals").eq("id", state["paper_id"]).execute()
+            if paper_res.data and paper_res.data[0].get("reproducibility_signals"):
+                signals = paper_res.data[0]["reproducibility_signals"]
+                reproducibility_section = (
+                    f"## Deterministic Reproducibility Scan Results\n\n"
+                    f"- Code Available: {signals.get('code_available')} (Details: {signals.get('code_details')})\n"
+                    f"- Data Available: {signals.get('data_available')} (Details: {signals.get('data_details')})\n"
+                    f"- Hyperparameters Disclosed: {signals.get('hyperparameters_disclosed')} (Details: {signals.get('hyperparameter_details')})\n"
+                    f"- Compute Disclosed: {signals.get('compute_disclosed')} (Details: {signals.get('compute_details')})\n"
+                    f"- Seed Disclosed: {signals.get('seed_disclosed')} (Details: {signals.get('seed_details')})\n\n"
+                )
+        except Exception as exc:
+            logger.warning("Failed to fetch reproducibility signals: %s", exc)
+
+    external_lit_section = ""
+    ext_search_results: list = []
+    if state["round_topic"] in ("novelty_scope", "experimental_setup"):
+        try:
+            first_chunk_text = chunks[0]["text"] if chunks else ""
+            # Extract simple search query from first chunk or topic name
+            query_words = first_chunk_text.split()[:20]
+            search_query = " ".join(query_words) if query_words else state["round_topic_name"]
+
+            ext_search_results = search_external_literature(search_query)
+
+            if state["round_topic"] == "novelty_scope" and ext_search_results:
+                ext_search_results = rank_candidates_by_novelty_overlap(
+                    first_chunk_text, ext_search_results, top_k=3
+                )
+
+            if ext_search_results:
+                cand_strings = []
+                for cand in ext_search_results:
+                    sim_str = (
+                        f" (Similarity score: {cand['similarity_score']:.2f})"
+                        if "similarity_score" in cand
+                        else ""
+                    )
+                    authors_str = ", ".join(cand.get("authors", []))
+                    cand_strings.append(
+                        f"- Title: {cand['title']}\n"
+                        f"  Authors: {authors_str}\n"
+                        f"  Year: {cand.get('year', 'N/A')}\n"
+                        f"  Source: {cand.get('source', 'External')}{sim_str}\n"
+                        f"  URL: {cand.get('url', '')}\n"
+                        f"  Abstract preview: {cand.get('abstract', '')[:250]}"
+                    )
+                external_lit_section = (
+                    "## Retrieved External Literature Candidates\n\n"
+                    + "\n\n".join(cand_strings)
+                    + "\n\n"
+                )
+        except Exception as exc:
+            logger.warning("Literature search in Attacker node failed: %s", exc)
+
     user_prompt = (
         f"## Retrieved Paper Excerpts\n\n{chunk_text}\n\n"
-        f"## Claims Already Raised This Round (DO NOT REPEAT)\n\n{prior}\n\n"
+        + reproducibility_section
+        + external_lit_section
+        + f"## Claims Already Raised This Round (DO NOT REPEAT)\n\n{prior}\n\n"
         + retry_section
         + f"Now identify the single most significant NEW weakness."
     )
@@ -234,6 +306,7 @@ def attacker_node(state: AuditState) -> dict:
     output.setdefault("claim_summary", "")
     output.setdefault("critique_text", "")
     output.setdefault("cited_chunk_ids", [])
+    output.setdefault("external_citations", [])
     output.setdefault("critique_type", "inconsistency")
 
     seq = state["sequence_counter"]
@@ -248,9 +321,11 @@ def attacker_node(state: AuditState) -> dict:
 
     return {
         "attacker_output": output,
+        "external_search_results": ext_search_results,
         "all_turns": [turn],
         "sequence_counter": seq + 1,
     }
+
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +392,24 @@ def validator_node(state: AuditState) -> dict:
     attacker_val = validate_attacker_citations(state["attacker_output"])
     defender_val = validate_defender_citations(state["defender_output"])
 
-    # Check if ALL attacker citations are valid (or there are none to check).
-    attacker_all_valid = all(v["valid"] for v in attacker_val) if attacker_val else True
+    external_val = []
+    if state["round_topic"] in ("novelty_scope", "experimental_setup"):
+        external_val = validate_external_citations(
+            state["attacker_output"].get("external_citations", []),
+            state.get("external_search_results", []),
+        )
+
+    # Check if ALL attacker citations (chunk + external) are valid.
+    chunk_valid = all(v["valid"] for v in attacker_val) if attacker_val else True
+    ext_valid = all(v["valid"] for v in external_val) if external_val else True
+    attacker_all_valid = chunk_valid and ext_valid
+
 
     # Store validator results as a turn
     validation_content = {
         "attacker_validations": attacker_val,
         "defender_validations": defender_val,
+        "external_validations": external_val,
         "attacker_citations_valid": attacker_all_valid,
     }
     seq = state["sequence_counter"]
@@ -355,6 +441,11 @@ def validator_node(state: AuditState) -> dict:
                         f"chunk {cid} — similarity {score:.3f} "
                         f"(below threshold)"
                     )
+        for ev in external_val:
+            if not ev.get("valid"):
+                failure_parts.append(
+                    f"External paper '{ev.get('title')}' did not exist in search results"
+                )
         retry_context = {
             "last_failed_critique": state["attacker_output"],
             "last_failure_reason": "; ".join(failure_parts) if failure_parts else "Citation validation failed",
@@ -363,6 +454,7 @@ def validator_node(state: AuditState) -> dict:
     return {
         "attacker_validation": attacker_val,
         "defender_validation": defender_val,
+        "external_validation": external_val,
         "attacker_valid": attacker_all_valid,
         "all_turns": [turn],
         "sequence_counter": seq + 1,
@@ -372,6 +464,7 @@ def validator_node(state: AuditState) -> dict:
         "attacker_retries": state["attacker_retries"] + (0 if attacker_all_valid else 1),
         **retry_context,
     }
+
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +510,40 @@ def referee_node(state: AuditState) -> dict:
     verdict_type = output["verdict"].upper().replace(" ", "_")
     if verdict_type not in ("SOLIDIFIED", "ACTIONABLE_FLAW", "CONTESTED"):
         verdict_type = "CONTESTED"
+
+    confidence = float(output.get("confidence", 0.5))
+
+    # Self-consistency check — if confidence < threshold, re-run Referee adjudication once
+    if confidence < SELF_CONSISTENCY_THRESHOLD:
+        logger.info(
+            "Referee confidence %.2f < threshold %.2f — performing self-consistency re-run",
+            confidence,
+            SELF_CONSISTENCY_THRESHOLD,
+        )
+        try:
+            output_rerun = llm.generate(system, user_prompt)
+            v2 = output_rerun.get("verdict", "").upper().replace(" ", "_")
+            if v2 not in ("SOLIDIFIED", "ACTIONABLE_FLAW", "CONTESTED"):
+                v2 = "CONTESTED"
+
+            if v2 != verdict_type:
+                logger.warning(
+                    "Self-consistency disagreement: initial '%s' vs re-run '%s' — forcing CONTESTED",
+                    verdict_type,
+                    v2,
+                )
+                output["rationale"] = (
+                    f"{output.get('rationale', '')} [Self-Consistency Note: Initial adjudication "
+                    f"resulted in '{verdict_type}', but re-run resulted in '{v2}'. "
+                    f"Forcing verdict to CONTESTED due to adjudication disagreement.]"
+                )
+                verdict_type = "CONTESTED"
+                output["verdict"] = "CONTESTED"
+            else:
+                logger.info("Self-consistency re-run agreed on '%s'", verdict_type)
+        except Exception as exc:
+            logger.warning("Self-consistency re-run failed: %s", exc)
+
 
     seq = state["sequence_counter"]
     turn = _store_turn(
@@ -538,8 +665,20 @@ def debrief_node(state: AuditState) -> dict:
     output.setdefault("actionable_weaknesses", [])
     output.setdefault("contested_points", [])
 
-    # Store in DB
     supabase = get_supabase()
+    reproducibility_signals = None
+    if state["round_topic"] == "reproducibility":
+        try:
+            paper_res = supabase.table("papers").select("reproducibility_signals").eq("id", state["paper_id"]).execute()
+            if paper_res.data:
+                reproducibility_signals = paper_res.data[0].get("reproducibility_signals")
+        except Exception as exc:
+            logger.warning("Failed to fetch reproducibility signals in debrief: %s", exc)
+
+    if reproducibility_signals:
+        output["reproducibility_checklist"] = reproducibility_signals
+
+    # Store in DB
     debrief_id = str(uuid.uuid4())
     supabase.table("debrief_cards").insert({
         "id": debrief_id,
@@ -549,6 +688,7 @@ def debrief_node(state: AuditState) -> dict:
         "actionable_weaknesses": json.dumps(output["actionable_weaknesses"]),
         "contested_points": json.dumps(output["contested_points"]),
     }).execute()
+
 
     # Update round + audit status
     supabase.table("rounds").update({"status": "completed"}).eq("id", state["round_id"]).execute()
@@ -704,7 +844,10 @@ def run_audit(
         "defender_output": {},
         "attacker_validation": [],
         "defender_validation": [],
+        "external_search_results": [],
+        "external_validation": [],
         "attacker_valid": True,
+
         "last_failed_critique": {},
         "last_failure_reason": "",
         "event_callback": event_callback,

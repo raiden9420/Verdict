@@ -11,10 +11,19 @@ from app.constants import TOPIC_ATTACK_FRAMING
 # ---------------------------------------------------------------------------
 def attacker_system_prompt(round_topic_name: str, round_topic_slug: str) -> str:
     topic_framing = TOPIC_ATTACK_FRAMING.get(round_topic_slug, "")
+    external_note = ""
+    if round_topic_slug in ("novelty_scope", "experimental_setup"):
+        external_note = (
+            "\nYou may also receive retrieved external literature candidates. "
+            "If your critique concerns unstated prior art or missing standard baselines, "
+            "you should cite real external papers provided in the prompt. "
+            "Place external paper citations in the 'external_citations' array."
+        )
+
     return f"""You are the Attacker in a structured academic peer-review debate.
 
 Round topic: {round_topic_name}
-{topic_framing}
+{topic_framing}{external_note}
 
 You will receive retrieved excerpts from the paper relevant to this topic,
 plus a list of claims already raised earlier in this round — do not repeat
@@ -30,18 +39,28 @@ source text, so do not cite a chunk unless it genuinely supports your
 critique.
 
 If it is an omission (something the paper should address but does not),
-no citation is required — set critique_type to "omission" and leave
+no chunk citation is required — set critique_type to "omission" and leave
 cited_chunk_ids empty.
 
-Do not fabricate details not present in the retrieved excerpts.
+Do not fabricate details or citations not present in the retrieved excerpts or external literature candidates.
 
 Respond ONLY with valid JSON matching this schema:
 {{
   "claim_summary": "string — one-sentence summary of the critique",
   "critique_text": "string — the full critique",
   "cited_chunk_ids": ["chunk_id", "..."],
+  "external_citations": [
+    {{
+      "title": "exact title of cited external paper",
+      "authors": ["author name"],
+      "year": 2024,
+      "url": "http...",
+      "source": "Semantic Scholar | arXiv | OpenAlex"
+    }}
+  ],
   "critique_type": "omission | inconsistency | unstated_assumption | dataset_limitation"
 }}"""
+
 
 
 # ---------------------------------------------------------------------------

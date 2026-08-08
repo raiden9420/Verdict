@@ -268,6 +268,18 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
 
     <section className={`debrief-card ${showDebrief ? 'open' : ''}`}><button className="debrief-header" onClick={() => setShowDebrief(!showDebrief)}><span><PIcon name="chart" /><strong>Round debrief</strong>{debrief ? <PTag variant="success">Final</PTag> : <PTag variant="warning">Provisional</PTag>}</span><span className="debrief-toggle">{showDebrief ? 'Collapse' : 'Expand'} <PIcon name={showDebrief ? 'arrow-up' : 'arrow-down'} /></span></button>{showDebrief && <div className="debrief-body">
       <div className="synthesis"><span className="small-muted">EXECUTIVE SYNTHESIS</span><p>{debrief?.executive_synthesis || 'Debrief will be generated at the end of the round.'}</p></div>
+      {debrief?.reproducibility_checklist && (
+        <div className="reproducibility-checklist" style={{ margin: '1rem 0', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.1)' }}>
+          <span className="small-muted" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>REPRODUCIBILITY CHECKLIST (DETERMINISTIC SCAN)</span>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.85rem' }}>
+            <div>Code: <strong>{debrief.reproducibility_checklist.code_available ? '✓ Disclosed' : '✗ Missing'}</strong></div>
+            <div>Data: <strong>{debrief.reproducibility_checklist.data_available ? '✓ Disclosed' : '✗ Missing'}</strong></div>
+            <div>Hyperparameters: <strong>{debrief.reproducibility_checklist.hyperparameters_disclosed ? '✓ Disclosed' : '✗ Missing'}</strong></div>
+            <div>Compute / Hardware: <strong>{debrief.reproducibility_checklist.compute_disclosed ? '✓ Disclosed' : '✗ Missing'}</strong></div>
+            <div>Random Seed: <strong>{debrief.reproducibility_checklist.seed_disclosed ? '✓ Disclosed' : '✗ Missing'}</strong></div>
+          </div>
+        </div>
+      )}
       <div className="debrief-columns">
         <div><span className="debrief-label strength">SOLIDIFIED STRENGTHS</span>
           {debrief?.solidified_strengths?.map((s, i) => <p key={i}><PIcon name="check" /> {s}</p>)}
@@ -277,6 +289,7 @@ function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief,
         </div>
       </div>
     </div>}</section>
+
     <div className="arena-bottom"><span><PIcon name="clock" /> Next round begins automatically</span><PButton variant="secondary" onClick={onReport}>View interim report</PButton></div>
   </div>;
 }

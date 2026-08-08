@@ -132,3 +132,50 @@ def validate_defender_citations(
     for cid in chunk_ids:
         results.append(validate_citation(cid, claim))
     return results
+
+
+def validate_external_citations(
+    external_citations: list[dict],
+    search_results: list[dict],
+) -> list[dict]:
+    """
+    Validate external literature citations by checking existence in search_results.
+
+    Parameters
+    ----------
+    external_citations : list of dicts from Attacker turn, e.g. [{"title": "...", "authors": [...]}]
+    search_results : list of dicts returned by search_external_literature()
+
+    Returns
+    -------
+    list of dicts with keys: title, valid, source
+    """
+    import re
+    if not external_citations:
+        return []
+
+    valid_titles = {
+        re.sub(r"[^a-z0-9]", "", p.get("title", "").lower())
+        for p in search_results
+        if p.get("title")
+    }
+
+    results = []
+    for cite in external_citations:
+        cite_title = cite.get("title", "")
+        norm_title = re.sub(r"[^a-z0-9]", "", cite_title.lower())
+
+        is_valid = any(
+            (norm_title and vt and (norm_title in vt or vt in norm_title))
+            for vt in valid_titles
+        )
+
+        results.append({
+            "title": cite_title,
+            "valid": is_valid,
+            "source": cite.get("source", "External Literature"),
+        })
+        logger.info("External citation validation: '%s' -> valid=%s", cite_title, is_valid)
+
+    return results
+

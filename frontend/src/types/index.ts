@@ -38,7 +38,13 @@ export const ROUND_TOPICS: RoundTopic[] = [
     name: "Limitations, Broader Impact & Edge Cases",
     description: "Does the paper honestly address where it breaks down?",
   },
+  {
+    slug: "statistical_rigor",
+    name: "Statistical Rigor & Methodological Validity",
+    description: "Are p-values, sample sizes, effect sizes, and multiple comparisons handled correctly?",
+  },
 ];
+
 
 // ---------------------------------------------------------------------------
 // API response types
@@ -102,13 +108,28 @@ export interface Verdict {
   cited_chunk_ids?: string[];
 }
 
+export interface ReproducibilitySignals {
+  code_available: boolean;
+  code_details?: string[];
+  data_available: boolean;
+  data_details?: string[];
+  hyperparameters_disclosed: boolean;
+  hyperparameter_details?: string[];
+  compute_disclosed: boolean;
+  compute_details?: string[];
+  seed_disclosed: boolean;
+  seed_details?: string[];
+}
+
 export interface DebriefCard {
   id: string;
   executive_synthesis?: string;
   solidified_strengths?: string[];
   actionable_weaknesses?: string[];
   contested_points?: string[];
+  reproducibility_checklist?: ReproducibilitySignals;
 }
+
 
 export interface TurnsListResponse {
   turns: Turn[];

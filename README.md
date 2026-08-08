@@ -52,12 +52,22 @@ Verdict heavily relies on **LangGraph** to orchestrate the adversarial debate as
 
 ## 🚀 Features
 
-- **Multi-Agent Adversarial Debate**: Powered by LangGraph and Gemini.
+- **Multi-Agent Adversarial Debate**: Powered by LangGraph with Gemini, Groq, and OpenRouter integration.
+- **6 Fixed Round Topics**:
+  1. Novelty, Scope & Problem Formulation (`novelty_scope`)
+  2. Theoretical Soundness & Mathematical Rigor (`theoretical_soundness`)
+  3. Experimental Setup, Datasets & Baselines (`experimental_setup`)
+  4. Reproducibility, Compute & Ablation Studies (`reproducibility`)
+  5. Limitations, Broader Impact & Edge Cases (`limitations_impact`)
+  6. **Statistical Rigor & Methodological Validity** (`statistical_rigor`)
+- **External Literature Grounding**: Live parallel search across Semantic Scholar, arXiv, and OpenAlex for prior art and baseline comparisons, with existence validation.
+- **Novelty & Overlap Detection**: Embedding-based similarity comparison between paper abstracts and external candidates.
+- **Deterministic Reproducibility Scanning**: Ingestion-time check for code, data, hyperparameter, compute, and random seed disclosures.
+- **Multi-Provider LLM Fallback Router**: Sequential fallback across Gemini → Groq → OpenRouter on rate limits (`429`).
+- **Self-Consistency Check**: Low-confidence Referee verdicts (`confidence < 0.5`) trigger re-adjudication, flagging disagreements as `CONTESTED`.
 - **Deterministic Citation Validation**: Trust is built in, not assumed.
-- **Single Page Application (SPA)**: A beautiful, seamless workspace built with Next.js and the Porsche Design System.
+- **Single Page Application (SPA)**: Next.js frontend with split-screen document viewer.
 - **Live SSE Streaming**: Watch the debate unfold in real-time.
-- **Split-Screen Workspace**: Integrated PDF viewer with auto-scrolling to cited pages.
-- **Round Debrief Cards**: Instant synthesis of Strengths, Weaknesses, and Contested points.
 
 ---
 
@@ -67,12 +77,14 @@ Verdict heavily relies on **LangGraph** to orchestrate the adversarial debate as
 - Python 3.11+
 - Node.js 18+
 - [Supabase](https://supabase.com) project (free tier) for vector storage
-- [Google AI Studio](https://aistudio.google.com) API key (free tier)
+- LLM API keys:
+  - [Google AI Studio](https://aistudio.google.com) API key (`GEMINI_API_KEY`)
+  - [Groq](https://console.groq.com) API key (`GROQ_API_KEY`, optional fallback)
+  - [OpenRouter](https://openrouter.ai) API key (`OPENROUTER_API_KEY`, optional fallback)
 
 ### 1. Database Setup
 1. Create a Supabase project at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** and paste the contents of `backend/migrations/001_initial_schema.sql`
-3. Run the query to create all tables, indexes, and the `match_chunks` RPC function.
+2. Go to **SQL Editor** and execute `backend/migrations/001_initial_schema.sql` and `backend/migrations/002_add_reproducibility_signals.sql`.
 
 ### 2. Backend (FastAPI)
 ```bash
@@ -87,11 +99,12 @@ pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your Gemini API key and Supabase credentials
+# Edit .env with your API keys and Supabase credentials
 
 # Start the server
 uvicorn app.main:app --reload --port 8000
 ```
+
 
 ### 3. Frontend (Next.js SPA)
 ```bash

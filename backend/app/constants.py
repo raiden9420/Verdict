@@ -35,8 +35,10 @@ EMBEDDING_DIMENSION = 384     # output_dimensionality sent to Gemini API;
 GROUNDING_SIMILARITY_THRESHOLD = 0.35  # cosine; below → citation invalid
 
 # ---------------------------------------------------------------------------
-# Round mechanics
+# Self-consistency check (Phase 2)
 # ---------------------------------------------------------------------------
+SELF_CONSISTENCY_THRESHOLD = 0.5  # re-run referee if confidence < 0.5
+
 EXCHANGES_PER_ROUND = 3       # fixed for Phase 1 (Fast depth)
 MAX_ATTACKER_RETRIES = 2      # retries if attacker's own citations fail
 
@@ -57,6 +59,7 @@ ROUND_TOPICS = {
     "experimental_setup": "Experimental Setup, Datasets & Baselines",
     "reproducibility": "Reproducibility, Compute & Ablation Studies",
     "limitations_impact": "Limitations, Broader Impact & Edge Cases",
+    "statistical_rigor": "Statistical Rigor & Methodological Validity",
 }
 
 # Topic-specific framing for the Attacker system prompt — tells the Attacker
@@ -91,4 +94,10 @@ TOPIC_ATTACK_FRAMING = {
         "impact, distributional assumptions, or edge cases that the method "
         "would not handle."
     ),
+    "statistical_rigor": (
+        "Focus on statistical methodology, sample sizes, p-values, power analysis, "
+        "effect sizes, multiple hypothesis testing corrections, and whether the "
+        "reported statistical significance genuinely supports the claims made."
+    ),
 }
+
