@@ -6,8 +6,9 @@ These are the contracts between frontend ↔ backend.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -20,12 +21,43 @@ class PaperUploadResponse(BaseModel):
     chunk_count: int
 
 
+class DocumentRelevanceResult(BaseModel):
+    """Strict output contract for the research-document classifier."""
+
+    is_research_paper: StrictBool
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class RelevanceRejectionDetail(BaseModel):
+    """Machine-readable response used by the upload override popup."""
+
+    code: Literal["document_not_research"] = "document_not_research"
+    message: str
+    reason: str
+    relevance_failed: Literal[True] = True
+    override_allowed: Literal[True] = True
+    retryable: Literal[False] = False
+
+
 # ---------------------------------------------------------------------------
 # Audits
 # ---------------------------------------------------------------------------
 class AuditCreateRequest(BaseModel):
     paper_id: str
     round_topic: str  # must be one of the topic slugs
+
+    @field_validator("paper_id")
+    @classmethod
+    def paper_id_must_be_uuid(cls, value: str) -> str:
+        import uuid
+
+        try:
+            parsed = uuid.UUID(str(value))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("paper_id must be a valid UUID") from exc
+        if parsed.int == 0:
+            raise ValueError("paper_id must not be the nil UUID")
+        return str(parsed)
 
 
 class AuditCreateResponse(BaseModel):
@@ -86,10 +118,11 @@ class TurnsListResponse(BaseModel):
     turns: list[TurnResponse]
     verdicts: list[VerdictResponse]
     status: str  # audit status
+    error_message: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
-    detail: str
+    detail: str | dict[str, Any]

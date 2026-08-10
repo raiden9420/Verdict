@@ -76,6 +76,9 @@ export interface ExternalValidationResult {
   title: string;
   valid: boolean;
   source?: string;
+  reason?: string;
+  citation_index?: number;
+  attempt_sequence?: number;
 }
 
 export interface TurnContent {
@@ -103,11 +106,13 @@ export interface TurnContent {
 }
 
 export interface ValidationResult {
-  chunk_id: string;
+  chunk_id: string | null;
   valid: boolean;
   similarity_score: number;
   chunk_text?: string;
   page_number?: number;
+  validation_method?: string;
+  reason?: string;
 }
 
 export interface Turn {
@@ -155,33 +160,8 @@ export interface TurnsListResponse {
   turns: Turn[];
   verdicts: Verdict[];
   status: string;
-}
-
-// ---------------------------------------------------------------------------
-// SSE event types
-// ---------------------------------------------------------------------------
-export type SSEEventType = "turn" | "verdict" | "debrief" | "complete" | "error" | "heartbeat" | "exchange_skipped" | "process_update";
-
-
-export interface SSEEvent {
-  type: SSEEventType;
-  data: Turn | Verdict | DebriefCard | { message?: string } | Record<string, never>;
-}
-
-// ---------------------------------------------------------------------------
-// UI state
-// ---------------------------------------------------------------------------
-export type AuditStatus = "idle" | "uploading" | "starting" | "in_progress" | "completed" | "error";
-
-export interface AuditState {
-  status: AuditStatus;
-  paperId?: string;
-  auditId?: string;
-  roundId?: string;
-  turns: Turn[];
-  verdicts: Verdict[];
-  debrief?: DebriefCard;
   error?: string;
-  highlightedPages: number[];
-  skippedExchanges: number[];
+  error_message?: string;
 }
+
+export type AuditStatus = "idle" | "in_progress" | "completed" | "error";

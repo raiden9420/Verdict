@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS papers (
     filename      TEXT NOT NULL,
     storage_path  TEXT,
     page_count    INTEGER,
+    session_id    TEXT,
+    embedding_space TEXT,
     uploaded_at   TIMESTAMPTZ DEFAULT now()
 );
 
@@ -42,6 +44,7 @@ CREATE TABLE IF NOT EXISTS audits (
     strictness_level  TEXT DEFAULT 'standard',
     depth             TEXT DEFAULT 'fast',
     status            TEXT DEFAULT 'pending',
+    error_message     TEXT,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 
@@ -101,6 +104,7 @@ CREATE TABLE IF NOT EXISTS debrief_cards (
 -- Indexes
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_chunks_paper      ON chunks(paper_id);
+CREATE INDEX IF NOT EXISTS idx_papers_session     ON papers(session_id);
 CREATE INDEX IF NOT EXISTS idx_audits_session     ON audits(session_id);
 CREATE INDEX IF NOT EXISTS idx_turns_round        ON turns(round_id, exchange_number, sequence);
 CREATE INDEX IF NOT EXISTS idx_verdicts_round     ON verdicts(round_id, exchange_number);
@@ -154,8 +158,8 @@ ALTER TABLE debrief_cards DISABLE ROW LEVEL SECURITY;
 -- ---------------------------------------------------------------------------
 -- Storage
 -- ---------------------------------------------------------------------------
--- Create 'papers' bucket for PDF storage (requires supabase storage extension, which is built-in)
-INSERT INTO storage.buckets (id, name, public) VALUES ('papers', 'papers', true) ON CONFLICT DO NOTHING;
-
--- Allow public access to the 'papers' bucket for Phase 1
-CREATE POLICY "Public Access" ON storage.objects FOR ALL USING (bucket_id = 'papers') WITH CHECK (bucket_id = 'papers');
+-- Papers are private. The backend authorizes a browser session and issues a
+-- short-lived signed URL; it must use a service-role/secret Supabase key.
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('papers', 'papers', false)
+ON CONFLICT (id) DO UPDATE SET public = false;

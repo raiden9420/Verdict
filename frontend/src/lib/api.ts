@@ -13,6 +13,11 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+interface ErrorPayload {
+  detail?: unknown;
+  message?: unknown;
+}
+
 /**
  * Build headers with the session ID.
  */
@@ -36,6 +41,37 @@ export class UploadError extends Error {
   }
 }
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+function objectValue(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
+function errorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  const message = objectValue(detail, "message");
+  if (typeof message === "string" && message.trim()) return message;
+  return fallback;
+}
+
+async function readErrorPayload(response: Response): Promise<ErrorPayload> {
+  return response.json().catch(() => ({ detail: response.statusText }));
+}
+
+function withSessionQuery(url: string): string {
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}session_id=${encodeURIComponent(getSessionId())}`;
+}
+
 // ---------------------------------------------------------------------------
 // Paper upload
 // ---------------------------------------------------------------------------
@@ -51,17 +87,18 @@ export async function uploadPaper(file: File, force: boolean = false): Promise<P
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const err = await readErrorPayload(res);
     const detail = err.detail;
     if (typeof detail === "object" && detail !== null) {
+      const relevanceFailed = objectValue(detail, "relevance_failed") === true;
+      const reason = objectValue(detail, "reason");
       throw new UploadError(
-        detail.message || "Upload failed",
-        Boolean(detail.relevance_failed),
-        detail.reason
+        errorMessage(detail, `Upload failed (${res.status})`),
+        relevanceFailed,
+        typeof reason === "string" ? reason : undefined,
       );
     }
-    const msg = typeof detail === "string" ? detail : "Upload failed";
-    throw new UploadError(msg, false);
+    throw new UploadError(errorMessage(detail, `Upload failed (${res.status})`));
   }
 
   return res.json();
@@ -81,8 +118,11 @@ export async function startAudit(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Failed to start audit");
+    const err = await readErrorPayload(res);
+    throw new ApiError(
+      errorMessage(err.detail ?? err.message, `Failed to start audit (${res.status})`),
+      res.status,
+    );
   }
 
   return res.json();
@@ -92,7 +132,7 @@ export async function startAudit(
 // SSE stream URL (consumed by useSSE hook directly)
 // ---------------------------------------------------------------------------
 export function streamUrl(auditId: string): string {
-  return `${API_BASE}/audits/${auditId}/stream`;
+  return withSessionQuery(`${API_BASE}/audits/${auditId}/stream`);
 }
 
 // ---------------------------------------------------------------------------
@@ -101,10 +141,15 @@ export function streamUrl(auditId: string): string {
 export async function fetchTurns(auditId: string): Promise<TurnsListResponse> {
   const res = await fetch(`${API_BASE}/audits/${auditId}/turns`, {
     headers: headers(),
+    cache: "no-store",
   });
 
   if (!res.ok) {
-    throw new Error("Failed to fetch turns");
+    const err = await readErrorPayload(res);
+    throw new ApiError(
+      errorMessage(err.detail ?? err.message, `Failed to fetch audit state (${res.status})`),
+      res.status,
+    );
   }
 
   return res.json();
@@ -116,13 +161,18 @@ export async function fetchTurns(auditId: string): Promise<TurnsListResponse> {
 export async function fetchDebrief(auditId: string): Promise<DebriefCard> {
   const res = await fetch(`${API_BASE}/audits/${auditId}/debrief`, {
     headers: headers(),
+    cache: "no-store",
   });
 
   if (!res.ok) {
     if (res.status === 404) {
-      throw new Error("Debrief not ready yet");
+      throw new ApiError("Debrief not ready yet", res.status);
     }
-    throw new Error("Failed to fetch debrief");
+    const err = await readErrorPayload(res);
+    throw new ApiError(
+      errorMessage(err.detail ?? err.message, `Failed to fetch debrief (${res.status})`),
+      res.status,
+    );
   }
 
   return res.json();
@@ -132,5 +182,29 @@ export async function fetchDebrief(auditId: string): Promise<DebriefCard> {
 // PDF URL (for the Document Viewer)
 // ---------------------------------------------------------------------------
 export function pdfUrl(paperId: string): string {
-  return `${API_BASE}/papers/${paperId}/pdf`;
+  return withSessionQuery(`${API_BASE}/papers/${paperId}/pdf`);
+}
+
+/**
+ * Verify PDF authorization without following the signed-storage redirect or
+ * downloading the paper. Cross-origin manual redirects are intentionally
+ * exposed as `opaqueredirect`; that still means the backend authorized access.
+ */
+export async function verifyPdfAccess(paperId: string): Promise<void> {
+  const res = await fetch(pdfUrl(paperId), {
+    method: "GET",
+    redirect: "manual",
+    cache: "no-store",
+  });
+
+  if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+    return;
+  }
+  if (!res.ok) {
+    const err = await readErrorPayload(res);
+    throw new ApiError(
+      errorMessage(err.detail ?? err.message, `PDF preview is unavailable (${res.status})`),
+      res.status,
+    );
+  }
 }

@@ -1,0 +1,104 @@
+"""Strict schemas for every LLM-authored audit artifact.
+
+Keeping these contracts separate from the HTTP models makes it possible to
+reject syntactically-valid but structurally unsafe model responses before they
+can enter graph state or be persisted.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal
+from uuid import UUID
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
+
+
+NonEmptyText = Annotated[StrictStr, Field(min_length=1)]
+
+
+def _canonical_chunk_id(value: str) -> str:
+    try:
+        return str(UUID(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("chunk IDs must be valid UUID strings") from exc
+
+
+ChunkId = Annotated[
+    StrictStr,
+    Field(min_length=36, max_length=36),
+    AfterValidator(_canonical_chunk_id),
+]
+
+
+class StrictAgentModel(BaseModel):
+    """Base contract shared by all agent outputs."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+    )
+
+
+class ExternalCitation(StrictAgentModel):
+    title: Annotated[StrictStr, Field(min_length=1, max_length=500)]
+    authors: Annotated[list[NonEmptyText], Field(max_length=100)] = Field(default_factory=list)
+    year: Annotated[StrictInt, Field(ge=1600, le=2100)] | None = None
+    url: Annotated[StrictStr, Field(max_length=2000)] = ""
+    source: Literal["Semantic Scholar", "arXiv", "OpenAlex"]
+
+
+class AttackerOutput(StrictAgentModel):
+    claim_summary: Annotated[StrictStr, Field(min_length=1, max_length=1000)]
+    critique_text: Annotated[StrictStr, Field(min_length=1, max_length=12000)]
+    cited_chunk_ids: Annotated[list[ChunkId], Field(max_length=20)]
+    external_citations: Annotated[list[ExternalCitation], Field(max_length=20)]
+    critique_type: Literal[
+        "omission",
+        "inconsistency",
+        "unstated_assumption",
+        "dataset_limitation",
+    ]
+
+    @model_validator(mode="after")
+    def omission_does_not_cite_document(self) -> "AttackerOutput":
+        if self.critique_type == "omission" and self.cited_chunk_ids:
+            raise ValueError("omission critiques must leave cited_chunk_ids empty")
+        return self
+
+
+class DefenderOutput(StrictAgentModel):
+    rebuttal_text: Annotated[StrictStr, Field(min_length=1, max_length=12000)]
+    cited_chunk_ids: Annotated[list[ChunkId], Field(max_length=20)]
+    concedes: StrictBool
+
+    @model_validator(mode="after")
+    def evidence_matches_position(self) -> "DefenderOutput":
+        if self.concedes and self.cited_chunk_ids:
+            raise ValueError("a concession must leave cited_chunk_ids empty")
+        if not self.concedes and not self.cited_chunk_ids:
+            raise ValueError("a non-conceding defense must cite paper evidence")
+        return self
+
+
+class RefereeOutput(StrictAgentModel):
+    verdict: Literal["SOLIDIFIED", "ACTIONABLE_FLAW", "CONTESTED"]
+    confidence: Annotated[StrictFloat, Field(ge=0.0, le=1.0)]
+    rationale: Annotated[StrictStr, Field(min_length=1, max_length=12000)]
+
+
+class DebriefOutput(StrictAgentModel):
+    executive_synthesis: Annotated[StrictStr, Field(min_length=1, max_length=20000)]
+    solidified_strengths: Annotated[list[NonEmptyText], Field(max_length=100)]
+    actionable_weaknesses: Annotated[list[NonEmptyText], Field(max_length=100)]
+    contested_points: Annotated[list[NonEmptyText], Field(max_length=100)]

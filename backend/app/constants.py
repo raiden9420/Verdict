@@ -28,11 +28,13 @@ TOP_K_RETRIEVAL = 5           # chunks returned per similarity search
 EMBEDDING_MODEL_NAME = "gemini-embedding-001"
 EMBEDDING_DIMENSION = 384     # output_dimensionality sent to Gemini API;
                               # matches existing Supabase vector(384) column
+EMBEDDING_SPACE_ID = f"{EMBEDDING_MODEL_NAME}:{EMBEDDING_DIMENSION}"
 
 # ---------------------------------------------------------------------------
 # Grounding validation
 # ---------------------------------------------------------------------------
-GROUNDING_SIMILARITY_THRESHOLD = 0.35  # cosine; below → citation invalid
+GROUNDING_SIMILARITY_THRESHOLD = 0.60  # cosine; below → citation invalid
+LEXICAL_GROUNDING_SIMILARITY_THRESHOLD = 0.45
 
 # ---------------------------------------------------------------------------
 # Self-consistency check (Phase 2)
@@ -100,4 +102,3 @@ TOPIC_ATTACK_FRAMING = {
         "reported statistical significance genuinely supports the claims made."
     ),
 }
-

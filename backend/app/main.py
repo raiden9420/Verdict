@@ -14,7 +14,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import validate_config
 from app.api.papers import router as papers_router
-from app.api.audits import router as audits_router, set_event_loop
+from app.api.audits import (
+    recover_orphaned_audits,
+    router as audits_router,
+    set_event_loop,
+    shutdown_audit_executor,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -33,10 +38,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     validate_config()
-    set_event_loop(asyncio.get_event_loop())
+    set_event_loop(asyncio.get_running_loop())
+    try:
+        await asyncio.to_thread(recover_orphaned_audits)
+    except Exception as exc:
+        # A transient database outage should not prevent the health endpoint
+        # from starting; audit creation will still fail closed until DB recovers.
+        logger.warning("Could not reconcile interrupted audits at startup: %s", exc)
     logger.info("Verdict backend started ✓")
     yield
     # Shutdown
+    shutdown_audit_executor()
     logger.info("Verdict backend shutting down")
 
 

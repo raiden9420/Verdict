@@ -1,0 +1,123 @@
+.toggle {
+  display: inline-flex;
+  min-width: 40px;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--pds-contrast-low);
+  border-radius: var(--pds-radius-md);
+  background: var(--pds-shading);
+  color: var(--pds-primary);
+  line-height: 1;
+  transition:
+    background var(--pds-duration-short) var(--pds-easing),
+    border-color var(--pds-duration-short) var(--pds-easing),
+    transform var(--pds-duration-short) var(--pds-easing);
+}
+
+.toggle:hover {
+  border-color: var(--pds-contrast-medium);
+  background: var(--pds-surface);
+}
+
+.toggle:active {
+  transform: scale(0.96);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--pds-focus);
+  outline-offset: 3px;
+}
+
+.icon {
+  position: relative;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+
+.icon svg {
+  position: absolute;
+  inset: 0;
+  width: 20px;
+  height: 20px;
+  transition:
+    opacity var(--pds-duration-short) var(--pds-easing),
+    transform var(--pds-duration-short) var(--pds-easing);
+}
+
+.sunIcon,
+.lightActionLabel {
+  opacity: 0;
+  transform: rotate(-20deg) scale(0.72);
+  pointer-events: none;
+}
+
+.moonIcon,
+.darkActionLabel {
+  opacity: 1;
+  transform: rotate(0) scale(1);
+}
+
+:global(html[data-theme="dark"]) .sunIcon,
+:global(html[data-theme="dark"]) .lightActionLabel {
+  opacity: 1;
+  transform: rotate(0) scale(1);
+}
+
+:global(html[data-theme="dark"]) .moonIcon,
+:global(html[data-theme="dark"]) .darkActionLabel {
+  opacity: 0;
+  transform: rotate(20deg) scale(0.72);
+  pointer-events: none;
+}
+
+.label {
+  position: relative;
+  display: inline-grid;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.label > span {
+  grid-area: 1 / 1;
+  transition:
+    opacity var(--pds-duration-short) var(--pds-easing),
+    transform var(--pds-duration-short) var(--pds-easing);
+}
+
+.assistiveLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.darkThemeDescription {
+  display: none;
+}
+
+:global(html[data-theme="dark"]) .lightThemeDescription {
+  display: none;
+}
+
+:global(html[data-theme="dark"]) .darkThemeDescription {
+  display: inline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle,
+  .icon svg,
+  .label > span {
+    transition: none;
+  }
+}

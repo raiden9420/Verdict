@@ -1,11 +1,12 @@
 """
 LangGraph state machine for the adversarial audit.
 
-Graph: Attacker → Defender → Validator → Referee  (×3 exchanges)
-                                                    → Debrief → END
+Graph: Attacker → Attacker Validator → Defender → Defender Validator → Referee
+         ↑ retry invalid attack                                      (×3)
+                                                                    → Debrief → END
 
-Each node stores its output in the DB, pushes an SSE event via
-`event_callback`, and returns partial state updates.
+Only accepted exchange artifacts are stored in the DB and pushed through
+`event_callback`; rejected Attacker attempts remain retry-only state.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from app.constants import (
 )
 
 from app.database import get_supabase
-from app.services.llm_client import get_llm_client
+from app.services.llm_client import get_llm_client, generate_structured_with_meta
 from app.services.retrieval_service import (
     retrieve_chunks,
     build_attacker_query,
@@ -42,6 +43,12 @@ from app.agents.grounding_validator import (
     validate_attacker_citations,
     validate_defender_citations,
     validate_external_citations,
+)
+from app.agents.schemas import (
+    AttackerOutput,
+    DefenderOutput,
+    RefereeOutput,
+    DebriefOutput,
 )
 from app.services.literature_search_service import (
     search_external_literature,
@@ -316,6 +323,14 @@ def attacker_node(state: AuditState) -> dict:
         except Exception as exc:
             logger.warning("Literature search in Attacker node failed: %s", exc)
 
+        if not ext_search_results:
+            external_lit_section = (
+                "## Retrieved External Literature Candidates\n\n"
+                "No external candidates were retrieved. You MUST leave "
+                "external_citations empty and ground the critique in the paper "
+                "or make a genuine omission critique.\n\n"
+            )
+
     user_prompt = (
         f"## Retrieved Paper Excerpts\n\n{chunk_text}\n\n"
         + reproducibility_section
@@ -326,36 +341,32 @@ def attacker_node(state: AuditState) -> dict:
     )
 
     system = attacker_system_prompt(state["round_topic_name"], state["round_topic"])
-    output = llm.generate(system, user_prompt)
-
-    # Ensure required fields exist with defaults
-    output.setdefault("claim_summary", "")
-    output.setdefault("critique_text", "")
-    output.setdefault("cited_chunk_ids", [])
-    output.setdefault("external_citations", [])
-    output.setdefault("critique_type", "inconsistency")
+    output, _, _ = generate_structured_with_meta(
+        llm,
+        system,
+        user_prompt,
+        AttackerOutput,
+    )
 
     if state["round_topic"] in ("novelty_scope", "experimental_setup"):
         output["external_search_performed"] = True
         output["external_sources"] = ["Semantic Scholar", "arXiv", "OpenAlex"]
         output["external_candidate_count"] = len(ext_search_results)
+        if not ext_search_results:
+            output["external_citations"] = []
+    else:
+        # Models occasionally volunteer plausible-sounding outside papers even
+        # when no literature search was performed. Such metadata is not evidence
+        # and must not make an otherwise valid in-document/omission critique fail.
+        output["external_citations"] = []
 
 
-    seq = state["sequence_counter"]
-    turn = _store_turn(
-        state["round_id"],
-        state["exchange_number"],
-        "attacker",
-        seq,
-        output,
-        state["event_callback"],
-    )
-
+    # Do not persist or stream this attempt yet.  The deterministic Attacker
+    # validator is the acceptance boundary; rejected attempts must never enter
+    # the transcript or the Debrief Card.
     return {
         "attacker_output": output,
         "external_search_results": ext_search_results,
-        "all_turns": [turn],
-        "sequence_counter": seq + 1,
     }
 
 
@@ -391,111 +402,163 @@ def defender_node(state: AuditState) -> dict:
     )
 
     system = defender_system_prompt()
-    output = llm.generate(system, user_prompt)
-
-    output.setdefault("rebuttal_text", "")
-    output.setdefault("cited_chunk_ids", [])
-    output.setdefault("concedes", False)
-
-    seq = state["sequence_counter"]
-    turn = _store_turn(
-        state["round_id"],
-        state["exchange_number"],
-        "defender",
-        seq,
-        output,
-        state["event_callback"],
+    output, _, _ = generate_structured_with_meta(
+        llm,
+        system,
+        user_prompt,
+        DefenderOutput,
     )
 
     return {
         "defender_output": output,
-        "all_turns": [turn],
-        "sequence_counter": seq + 1,
     }
 
 
 # ---------------------------------------------------------------------------
-# Node: Grounding Validator (deterministic — no LLM)
+# Nodes: Grounding Validators (deterministic — no LLM)
 # ---------------------------------------------------------------------------
-def validator_node(state: AuditState) -> dict:
-    """Validate citations from both Attacker and Defender."""
-    logger.info("Exchange %d — Validator", state["exchange_number"])
+def attacker_validator_node(state: AuditState) -> dict:
+    """Accept an Attacker attempt only after all claimed evidence is valid."""
+    logger.info("Exchange %d — Attacker Validator", state["exchange_number"])
 
-    attacker_val = validate_attacker_citations(state["attacker_output"])
-    defender_val = validate_defender_citations(state["defender_output"])
+    attacker = state["attacker_output"]
+    attacker_val = validate_attacker_citations(attacker, paper_id=state["paper_id"])
+    ext_cites = attacker.get("external_citations", [])
+    external_val = validate_external_citations(
+        ext_cites,
+        state.get("external_search_results", []),
+    ) if ext_cites else []
 
-    external_val = []
-    if state["round_topic"] in ("novelty_scope", "experimental_setup"):
-        external_val = validate_external_citations(
-            state["attacker_output"].get("external_citations", []),
-            state.get("external_search_results", []),
-        )
+    has_chunks = bool(attacker.get("cited_chunk_ids"))
+    has_external = bool(ext_cites)
+    chunk_valid = len(attacker_val) == len(attacker.get("cited_chunk_ids", [])) and all(
+        result.get("valid", False) for result in attacker_val
+    )
+    external_valid = len(external_val) == len(ext_cites) and all(
+        result.get("valid", False) for result in external_val
+    )
+    evidence_required = attacker.get("critique_type") != "omission"
+    has_valid_evidence_kind = has_chunks or has_external or not evidence_required
+    attacker_all_valid = (
+        has_valid_evidence_kind
+        and (not has_chunks or chunk_valid)
+        and (not has_external or external_valid)
+    )
 
-    # Check if ALL attacker citations (chunk + external) are valid.
-    chunk_valid = all(v["valid"] for v in attacker_val) if attacker_val else True
-    ext_valid = all(v["valid"] for v in external_val) if external_val else True
-    attacker_all_valid = chunk_valid and ext_valid
+    if not attacker_all_valid:
+        failure_parts: list[str] = []
+        if evidence_required and not (has_chunks or has_external):
+            failure_parts.append("non-omission critique supplied no evidence")
+        for result in attacker_val:
+            if not result.get("valid"):
+                failure_parts.append(
+                    f"chunk {result.get('chunk_id') or 'missing'}: "
+                    f"{result.get('reason', 'citation validation failed')}"
+                )
+        for result in external_val:
+            if not result.get("valid"):
+                failure_parts.append(
+                    f"external paper '{result.get('title', '')}': "
+                    f"{result.get('reason', 'citation validation failed')}"
+                )
 
+        callback = state.get("event_callback")
+        if callback:
+            try:
+                callback({
+                    "type": "process_update",
+                    "data": {
+                        "message": "Attacker evidence was rejected; regenerating a grounded critique...",
+                        "process": "attacker_retry",
+                        "exchange_number": state["exchange_number"],
+                    },
+                })
+            except Exception:
+                logger.warning("SSE callback failed for attacker retry update")
 
-    # Store validator results as a turn
-    validation_content = {
-        "attacker_validations": attacker_val,
-        "defender_validations": defender_val,
-        "external_validations": external_val,
-        "attacker_citations_valid": attacker_all_valid,
-    }
+        return {
+            "attacker_validation": attacker_val,
+            "external_validation": external_val,
+            "attacker_valid": False,
+            "attacker_retries": state["attacker_retries"] + 1,
+            "last_failed_critique": attacker,
+            "last_failure_reason": "; ".join(failure_parts) or "citation validation failed",
+        }
+
+    # Attach the deterministic external-validation result to accepted citation
+    # metadata.  This is informational; Referee context receives the full
+    # authoritative validation records separately.
+    accepted_attacker = dict(attacker)
+    accepted_attacker["external_citations"] = [
+        {**citation, "validated": validation.get("valid", False)}
+        for citation, validation in zip(ext_cites, external_val)
+    ]
     seq = state["sequence_counter"]
     turn = _store_turn(
         state["round_id"],
         state["exchange_number"],
-        "validator",
+        "attacker",
         seq,
+        accepted_attacker,
+        state["event_callback"],
+    )
+    return {
+        "attacker_output": accepted_attacker,
+        "attacker_validation": attacker_val,
+        "external_validation": external_val,
+        "attacker_valid": True,
+        "all_turns": [turn],
+        "sequence_counter": seq + 1,
+    }
+
+
+def defender_validator_node(state: AuditState) -> dict:
+    """Validate and persist the Defender plus the combined validation turn."""
+    logger.info("Exchange %d — Defender Validator", state["exchange_number"])
+    defender = state["defender_output"]
+    defender_val = validate_defender_citations(defender, paper_id=state["paper_id"])
+    defender_valid = (
+        defender.get("concedes", False)
+        or (
+            len(defender_val) == len(defender.get("cited_chunk_ids", []))
+            and bool(defender_val)
+            and all(result.get("valid", False) for result in defender_val)
+        )
+    )
+
+    seq = state["sequence_counter"]
+    defender_turn = _store_turn(
+        state["round_id"],
+        state["exchange_number"],
+        "defender",
+        seq,
+        defender,
+        state["event_callback"],
+    )
+    validation_content = {
+        "attacker_validations": state["attacker_validation"],
+        "defender_validations": defender_val,
+        "external_validations": state.get("external_validation", []),
+        "attacker_citations_valid": True,
+        "defender_citations_valid": defender_valid,
+    }
+    validator_turn = _store_turn(
+        state["round_id"],
+        state["exchange_number"],
+        "validator",
+        seq + 1,
         validation_content,
         state["event_callback"],
     )
-
-    # Build retry context when attacker citations fail, so the retried
-    # attacker call knows what went wrong and can course-correct.
-    retry_context: dict = {}
-    if not attacker_all_valid:
-        # Build a human-readable failure reason from validation results
-        failure_parts = []
-        for v in attacker_val:
-            cid = v.get("chunk_id", "unknown")
-            score = v.get("similarity_score", 0.0)
-            if not v.get("valid"):
-                if cid is None:
-                    failure_parts.append(
-                        "No citations were provided for a non-omission critique"
-                    )
-                else:
-                    failure_parts.append(
-                        f"chunk {cid} — similarity {score:.3f} "
-                        f"(below threshold)"
-                    )
-        for ev in external_val:
-            if not ev.get("valid"):
-                failure_parts.append(
-                    f"External paper '{ev.get('title')}' did not exist in search results"
-                )
-        retry_context = {
-            "last_failed_critique": state["attacker_output"],
-            "last_failure_reason": "; ".join(failure_parts) if failure_parts else "Citation validation failed",
-        }
-
     return {
-        "attacker_validation": attacker_val,
         "defender_validation": defender_val,
-        "external_validation": external_val,
-        "attacker_valid": attacker_all_valid,
-        "all_turns": [turn],
-        "sequence_counter": seq + 1,
-        # Increment retry counter when attacker citations fail —
-        # this is what route_after_validation checks to decide
-        # whether to retry or skip the exchange.
-        "attacker_retries": state["attacker_retries"] + (0 if attacker_all_valid else 1),
-        **retry_context,
+        "all_turns": [defender_turn, validator_turn],
+        "sequence_counter": seq + 2,
     }
+
+
+# Backwards-compatible import for callers that used the old validator name.
+validator_node = attacker_validator_node
 
 
 
@@ -513,6 +576,8 @@ def referee_node(state: AuditState) -> dict:
     # Format validation results for the Referee's context
     atk_val_text = json.dumps(state["attacker_validation"], indent=2) or "[]"
     def_val_text = json.dumps(state["defender_validation"], indent=2) or "[]"
+    atk_ext_text = json.dumps(attacker.get("external_citations", []), indent=2) or "[]"
+    ext_val_text = json.dumps(state.get("external_validation", []), indent=2) or "[]"
 
     user_prompt = (
         f"## Round Topic: {state['round_topic_name']}\n\n"
@@ -520,43 +585,57 @@ def referee_node(state: AuditState) -> dict:
         f"**Summary:** {attacker.get('claim_summary', '')}\n"
         f"**Full text:** {attacker.get('critique_text', '')}\n"
         f"**Type:** {attacker.get('critique_type', '')}\n"
-        f"**Citations:** {attacker.get('cited_chunk_ids', [])}\n\n"
+        f"**In-document citations:** {attacker.get('cited_chunk_ids', [])}\n"
+        f"**External literature citations:** {atk_ext_text}\n\n"
         f"## Defender's Rebuttal\n"
         f"**Text:** {defender.get('rebuttal_text', '')}\n"
         f"**Citations:** {defender.get('cited_chunk_ids', [])}\n"
         f"**Concedes:** {defender.get('concedes', False)}\n\n"
         f"## Grounding Validation Results (Authoritative)\n"
-        f"**Attacker citations:** {atk_val_text}\n"
+        f"**Attacker chunk citations:** {atk_val_text}\n"
+        f"**Attacker external literature validation:** {ext_val_text}\n"
         f"**Defender citations:** {def_val_text}\n\n"
         f"Now adjudicate this exchange."
     )
 
     system = referee_system_prompt()
-    output = llm.generate(system, user_prompt)
+    output, provider_client, provider_name = generate_structured_with_meta(
+        llm,
+        system,
+        user_prompt,
+        RefereeOutput,
+    )
+    verdict_type = output["verdict"]
+    confidence = output["confidence"]
 
-    output.setdefault("verdict", "CONTESTED")
-    output.setdefault("confidence", 0.5)
-    output.setdefault("rationale", "")
-
-    # Normalize verdict value
-    verdict_type = output["verdict"].upper().replace(" ", "_")
-    if verdict_type not in ("SOLIDIFIED", "ACTIONABLE_FLAW", "CONTESTED"):
-        verdict_type = "CONTESTED"
-
-    confidence = float(output.get("confidence", 0.5))
+    defender_cites = defender.get("cited_chunk_ids", [])
+    defender_concedes = defender.get("concedes", False)
+    defense_has_valid_evidence = (
+        not defender_concedes
+        and bool(defender_cites)
+        and len(state["defender_validation"]) == len(defender_cites)
+        and all(result.get("valid", False) for result in state["defender_validation"])
+    )
+    force_actionable = defender_concedes or not defense_has_valid_evidence
 
     # Self-consistency check — if confidence < threshold, re-run Referee adjudication once
-    if confidence < SELF_CONSISTENCY_THRESHOLD:
+    if confidence < SELF_CONSISTENCY_THRESHOLD and not force_actionable:
         logger.info(
-            "Referee confidence %.2f < threshold %.2f — performing self-consistency re-run",
+            "Referee confidence %.2f < threshold %.2f — performing "
+            "self-consistency re-run via pinned provider '%s'",
             confidence,
             SELF_CONSISTENCY_THRESHOLD,
+            provider_name,
         )
         try:
-            output_rerun = llm.generate(system, user_prompt)
-            v2 = output_rerun.get("verdict", "").upper().replace(" ", "_")
-            if v2 not in ("SOLIDIFIED", "ACTIONABLE_FLAW", "CONTESTED"):
-                v2 = "CONTESTED"
+            output_rerun, _, _ = generate_structured_with_meta(
+                llm,
+                system,
+                user_prompt,
+                RefereeOutput,
+                pinned_client=provider_client,
+            )
+            v2 = output_rerun["verdict"]
 
             if v2 != verdict_type:
                 logger.warning(
@@ -574,7 +653,25 @@ def referee_node(state: AuditState) -> dict:
             else:
                 logger.info("Self-consistency re-run agreed on '%s'", verdict_type)
         except Exception as exc:
-            logger.warning("Self-consistency re-run failed: %s", exc)
+            logger.warning(
+                "Self-consistency re-run failed on pinned provider '%s': %s",
+                provider_name,
+                exc,
+            )
+
+    # Deterministic trust boundary: a concession, missing evidence, or any
+    # invalid/cross-paper defense citation is always an actionable flaw.  The
+    # model may explain evidence quality, but cannot override this invariant.
+    if force_actionable:
+        reason = (
+            "The Defender conceded the critique."
+            if defender_concedes
+            else "The Defender did not provide fully validated in-paper evidence."
+        )
+        if verdict_type != "ACTIONABLE_FLAW":
+            output["rationale"] = f"{output['rationale']} [Grounding guard: {reason}]"
+        verdict_type = "ACTIONABLE_FLAW"
+        output["verdict"] = verdict_type
 
 
     seq = state["sequence_counter"]
@@ -588,7 +685,7 @@ def referee_node(state: AuditState) -> dict:
     )
 
     # Collect all cited chunk IDs from both sides for the verdict record
-    all_cited = list(set(
+    all_cited = sorted(set(
         attacker.get("cited_chunk_ids", [])
         + defender.get("cited_chunk_ids", [])
     ))
@@ -618,43 +715,23 @@ def referee_node(state: AuditState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: Skip Exchange (when attacker citations repeatedly fail)
-# ---------------------------------------------------------------------------
-def skip_exchange_node(state: AuditState) -> dict:
-    """Increment exchange counter when attacker can't produce valid cites."""
-    exchange = state["exchange_number"]
-    logger.warning(
-        "Exchange %d skipped — attacker citations failed validation",
-        exchange,
-    )
-
-    # Push an SSE event so the frontend can display a skip notice
-    # instead of a mysterious gap in exchange numbers.
-    callback = state.get("event_callback")
-    if callback:
-        try:
-            callback({
-                "type": "exchange_skipped",
-                "data": {"exchange_number": exchange},
-            })
-        except Exception:
-            logger.warning("SSE callback failed for exchange_skipped")
-
-    return {
-        "exchange_number": exchange + 1,
-        "attacker_retries": 0,
-        # Clear retry context for the next exchange
-        "last_failed_critique": {},
-        "last_failure_reason": "",
-    }
-
-
-# ---------------------------------------------------------------------------
 # Node: Debrief Card synthesis
 # ---------------------------------------------------------------------------
 def debrief_node(state: AuditState) -> dict:
     """Generate the round-level Debrief Card from the full transcript."""
     logger.info("Generating Debrief Card …")
+
+    verdict_count = len(state["all_verdicts"])
+    verdict_exchanges = {
+        verdict.get("exchange_number") for verdict in state["all_verdicts"]
+    }
+    expected_exchanges = set(range(1, EXCHANGES_PER_ROUND + 1))
+    if verdict_count != EXCHANGES_PER_ROUND or verdict_exchanges != expected_exchanges:
+        raise RuntimeError(
+            "Refusing to complete an incomplete audit: expected exactly "
+            f"{EXCHANGES_PER_ROUND} adjudicated exchanges, received "
+            f"{verdict_count} with exchange IDs {sorted(verdict_exchanges, key=str)}"
+        )
 
     llm = get_llm_client()
 
@@ -690,12 +767,12 @@ def debrief_node(state: AuditState) -> dict:
     )
 
     system = debrief_system_prompt()
-    output = llm.generate(system, user_prompt)
-
-    output.setdefault("executive_synthesis", "")
-    output.setdefault("solidified_strengths", [])
-    output.setdefault("actionable_weaknesses", [])
-    output.setdefault("contested_points", [])
+    output, _, _ = generate_structured_with_meta(
+        llm,
+        system,
+        user_prompt,
+        DebriefOutput,
+    )
 
     supabase = get_supabase()
     reproducibility_signals = None
@@ -741,7 +818,6 @@ def debrief_node(state: AuditState) -> dict:
                     **output,
                 },
             })
-            callback({"type": "complete", "data": {}})
         except Exception:
             logger.warning("SSE callback failed for debrief")
 
@@ -754,27 +830,24 @@ def debrief_node(state: AuditState) -> dict:
 # Routing functions
 # ---------------------------------------------------------------------------
 def route_after_validation(state: AuditState) -> str:
-    """After validation, decide: proceed to referee, retry attacker, or skip."""
+    """After Attacker validation, proceed to Defender or regenerate."""
     if not state["attacker_valid"]:
-        if state["attacker_retries"] < MAX_ATTACKER_RETRIES:
+        if state["attacker_retries"] <= MAX_ATTACKER_RETRIES:
             logger.info("Attacker citations invalid — retrying")
             return "attacker"
-        else:
-            logger.info("Attacker citations invalid — max retries, skipping")
-            return "skip_exchange"
-    return "referee"
+        raise RuntimeError(
+            "Attacker failed to produce a grounded critique after "
+            f"{state['attacker_retries']} attempts; audit was not completed"
+        )
+    return "defender"
 
 
 def route_after_referee(state: AuditState) -> str:
     """After referee, decide: next exchange or debrief."""
-    if state["exchange_number"] > EXCHANGES_PER_ROUND:
-        return "debrief"
-    return "attacker"
-
-
-def route_after_skip(state: AuditState) -> str:
-    """After skipping, decide: next exchange or debrief."""
-    if state["exchange_number"] > EXCHANGES_PER_ROUND:
+    verdict_count = len(state["all_verdicts"])
+    if verdict_count > EXCHANGES_PER_ROUND:
+        raise RuntimeError("Audit produced more verdicts than configured exchanges")
+    if verdict_count == EXCHANGES_PER_ROUND:
         return "debrief"
     return "attacker"
 
@@ -788,30 +861,26 @@ def build_audit_graph() -> StateGraph:
 
     # Nodes
     graph.add_node("attacker", attacker_node)
+    graph.add_node("attacker_validator", attacker_validator_node)
     graph.add_node("defender", defender_node)
-    graph.add_node("validator", validator_node)
+    graph.add_node("defender_validator", defender_validator_node)
     graph.add_node("referee", referee_node)
-    graph.add_node("skip_exchange", skip_exchange_node)
     graph.add_node("debrief", debrief_node)
 
     # Fixed edges
-    graph.add_edge("attacker", "defender")
-    graph.add_edge("defender", "validator")
+    graph.add_edge("attacker", "attacker_validator")
+    graph.add_edge("defender", "defender_validator")
+    graph.add_edge("defender_validator", "referee")
 
     # Conditional edges
     graph.add_conditional_edges(
-        "validator",
+        "attacker_validator",
         route_after_validation,
-        {"referee": "referee", "attacker": "attacker", "skip_exchange": "skip_exchange"},
+        {"defender": "defender", "attacker": "attacker"},
     )
     graph.add_conditional_edges(
         "referee",
         route_after_referee,
-        {"attacker": "attacker", "debrief": "debrief"},
-    )
-    graph.add_conditional_edges(
-        "skip_exchange",
-        route_after_skip,
         {"attacker": "attacker", "debrief": "debrief"},
     )
     graph.add_edge("debrief", END)
@@ -904,9 +973,4 @@ def run_audit(
             supabase.table("rounds").update({"status": "error"}).eq("id", round_id).execute()
         except Exception:
             logger.error("Failed to update audit status after error")
-        if event_callback:
-            try:
-                event_callback({"type": "error", "data": {"message": str(exc)}})
-            except Exception:
-                pass
         raise

@@ -12,19 +12,144 @@ import logging
 import urllib.request
 import urllib.error
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, TypeVar
 
 import certifi
 import google.genai as genai
 from google.genai import types
+from pydantic import BaseModel, ValidationError
 
 from app.config import GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY
 from app.constants import GEMINI_MODEL, LLM_MAX_RETRIES, LLM_BASE_DELAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
+AgentSchema = TypeVar("AgentSchema", bound=BaseModel)
+SCHEMA_VALIDATION_RETRIES = 3
+_TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
 # Verified SSL context using certifi CA bundle
 ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+
+
+def _retry_delay(attempt: int) -> int:
+    """Bounded exponential delay; ``attempt`` is zero-indexed."""
+    return min(30, LLM_BASE_DELAY_SECONDS * (2**attempt))
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _TRANSIENT_HTTP_CODES
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
+    error = str(exc).lower()
+    return any(
+        marker in error
+        for marker in (
+            "408",
+            "409",
+            "425",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "deadline",
+            "resource exhausted",
+            "rate limit",
+            "quota",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection aborted",
+        )
+    )
+
+
+def _generate_openai_compatible(
+    *,
+    provider_name: str,
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict,
+) -> dict:
+    """Call an OpenAI-compatible endpoint with bounded transient retries."""
+    last_exc: Exception | None = None
+    data_bytes = json.dumps(payload).encode("utf-8")
+
+    for attempt in range(LLM_MAX_RETRIES):
+        try:
+            request = urllib.request.Request(
+                endpoint,
+                data=data_bytes,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(
+                request,
+                timeout=30.0,
+                context=ssl_ctx,
+            ) as response:
+                response_json = json.loads(response.read().decode("utf-8"))
+                raw = response_json["choices"][0]["message"]["content"].strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[-1]
+                    raw = raw.rsplit("```", 1)[0]
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    repaired = _repair_json(raw)
+                    if repaired is not None:
+                        logger.info(
+                            "JSON repair succeeded for %s on attempt %d",
+                            provider_name,
+                            attempt + 1,
+                        )
+                        return repaired
+                    last_exc = exc
+                    logger.warning(
+                        "%s returned malformed JSON (attempt %d/%d)",
+                        provider_name,
+                        attempt + 1,
+                        LLM_MAX_RETRIES,
+                    )
+                    continue
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            last_exc = RuntimeError(f"{provider_name} API error {exc.code}: {body}")
+            logger.warning("%s API HTTP error %d: %s", provider_name, exc.code, body)
+            if not _is_transient_provider_error(exc):
+                raise last_exc from exc
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_provider_error(exc) and not isinstance(
+                exc,
+                (json.JSONDecodeError, KeyError, IndexError, TypeError),
+            ):
+                raise RuntimeError(f"{provider_name} API call failed: {exc}") from exc
+            logger.warning(
+                "Transient or malformed %s response (attempt %d/%d): %s",
+                provider_name,
+                attempt + 1,
+                LLM_MAX_RETRIES,
+                exc,
+            )
+
+        if attempt < LLM_MAX_RETRIES - 1:
+            delay = _retry_delay(attempt)
+            logger.info(
+                "Retrying %s in %ds (attempt %d/%d)",
+                provider_name,
+                delay,
+                attempt + 2,
+                LLM_MAX_RETRIES,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"{provider_name} LLM call failed after {LLM_MAX_RETRIES} attempts: {last_exc}"
+    ) from last_exc
 
 
 
@@ -107,21 +232,19 @@ class GeminiClient(LLMClient):
 
             except Exception as exc:
                 last_exc = exc
-                err = str(exc).lower()
-                rate_limited = any(
-                    tok in err
-                    for tok in ("429", "resource exhausted", "rate", "quota")
-                )
-                if rate_limited:
+                if _is_transient_provider_error(exc):
                     api_failures += 1
-                    delay = min(30, LLM_BASE_DELAY_SECONDS * (2 ** api_failures))
+                    delay = _retry_delay(api_failures - 1)
                     logger.warning(
-                        "Gemini Rate-limited (api attempt %d/%d), retrying in %ds …",
+                        "Transient Gemini failure (api attempt %d/%d), "
+                        "retrying in %ds: %s",
                         api_failures,
                         MAX_API_RETRIES,
                         delay,
+                        exc,
                     )
-                    time.sleep(delay)
+                    if api_failures < MAX_API_RETRIES:
+                        time.sleep(delay)
                 else:
                     logger.error("Gemini call failed (non-retryable): %s", exc)
                     raise
@@ -161,36 +284,12 @@ class GroqClient(LLMClient):
             "temperature": 0.4,
         }
 
-        MAX_JSON_RETRIES = 3
-        last_exc: Exception | None = None
-
-        for attempt in range(MAX_JSON_RETRIES):
-            try:
-                data_bytes = json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(self.endpoint, data=data_bytes, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=30.0, context=ssl_ctx) as resp:
-                    res_json = json.loads(resp.read().decode("utf-8"))
-                    raw = res_json["choices"][0]["message"]["content"].strip()
-                    if raw.startswith("```"):
-                        raw = raw.split("\n", 1)[-1]
-                        raw = raw.rsplit("```", 1)[0]
-                    try:
-                        return json.loads(raw)
-                    except json.JSONDecodeError:
-                        repaired = _repair_json(raw)
-                        if repaired is not None:
-                            logger.info("JSON repair succeeded for Groq on attempt %d", attempt + 1)
-                            return repaired
-                        last_exc = json.JSONDecodeError("malformed", raw[:100], 0)
-            except urllib.error.HTTPError as http_err:
-                err_body = http_err.read().decode("utf-8", errors="ignore")
-                logger.warning("Groq API HTTP error %d: %s", http_err.code, err_body)
-                raise RuntimeError(f"Groq API error {http_err.code}: {err_body}") from http_err
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("Groq API call failed (attempt %d): %s", attempt + 1, exc)
-
-        raise RuntimeError(f"Groq LLM call failed: {last_exc}")
+        return _generate_openai_compatible(
+            provider_name="Groq",
+            endpoint=self.endpoint,
+            headers=headers,
+            payload=payload,
+        )
 
 
 class OpenRouterClient(LLMClient):
@@ -225,36 +324,12 @@ class OpenRouterClient(LLMClient):
             "temperature": 0.4,
         }
 
-        MAX_JSON_RETRIES = 3
-        last_exc: Exception | None = None
-
-        for attempt in range(MAX_JSON_RETRIES):
-            try:
-                data_bytes = json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(self.endpoint, data=data_bytes, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=30.0, context=ssl_ctx) as resp:
-                    res_json = json.loads(resp.read().decode("utf-8"))
-                    raw = res_json["choices"][0]["message"]["content"].strip()
-                    if raw.startswith("```"):
-                        raw = raw.split("\n", 1)[-1]
-                        raw = raw.rsplit("```", 1)[0]
-                    try:
-                        return json.loads(raw)
-                    except json.JSONDecodeError:
-                        repaired = _repair_json(raw)
-                        if repaired is not None:
-                            logger.info("JSON repair succeeded for OpenRouter on attempt %d", attempt + 1)
-                            return repaired
-                        last_exc = json.JSONDecodeError("malformed", raw[:100], 0)
-            except urllib.error.HTTPError as http_err:
-                err_body = http_err.read().decode("utf-8", errors="ignore")
-                logger.warning("OpenRouter API HTTP error %d: %s", http_err.code, err_body)
-                raise RuntimeError(f"OpenRouter API error {http_err.code}: {err_body}") from http_err
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("OpenRouter API call failed (attempt %d): %s", attempt + 1, exc)
-
-        raise RuntimeError(f"OpenRouter LLM call failed: {last_exc}")
+        return _generate_openai_compatible(
+            provider_name="OpenRouter",
+            endpoint=self.endpoint,
+            headers=headers,
+            payload=payload,
+        )
 
 
 class MultiProviderLLMClient(LLMClient):
@@ -322,6 +397,81 @@ class MultiProviderLLMClient(LLMClient):
     def generate(self, system_prompt: str, user_prompt: str) -> dict:
         res, _, _ = self.generate_with_meta(system_prompt, user_prompt)
         return res
+
+
+def generate_structured_with_meta(
+    client: LLMClient,
+    system_prompt: str,
+    user_prompt: str,
+    output_schema: type[AgentSchema],
+    *,
+    pinned_client: LLMClient | None = None,
+    max_schema_attempts: int = SCHEMA_VALIDATION_RETRIES,
+) -> tuple[dict, LLMClient, str]:
+    """Generate and strictly validate a JSON object against ``output_schema``.
+
+    JSON syntax alone is not an agent contract.  This helper retries the model
+    when types, required fields, enum values, UUIDs, or numeric ranges are
+    invalid.  When ``pinned_client`` is supplied (the Referee consistency
+    check), every retry stays on that exact provider instance.
+    """
+    if max_schema_attempts < 1:
+        raise ValueError("max_schema_attempts must be at least 1")
+
+    prompt = user_prompt
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_schema_attempts + 1):
+        if pinned_client is not None:
+            if isinstance(client, MultiProviderLLMClient):
+                raw, serving_client, provider_name = client.generate_with_meta(
+                    system_prompt,
+                    prompt,
+                    pinned_client=pinned_client,
+                )
+            else:
+                raw = pinned_client.generate(system_prompt, prompt)
+                serving_client = pinned_client
+                provider_name = str(getattr(pinned_client, "model_name", type(pinned_client).__name__))
+        elif isinstance(client, MultiProviderLLMClient):
+            raw, serving_client, provider_name = client.generate_with_meta(system_prompt, prompt)
+        else:
+            raw = client.generate(system_prompt, prompt)
+            serving_client = client
+            provider_name = str(getattr(client, "model_name", type(client).__name__))
+
+        try:
+            if not isinstance(raw, dict):
+                raise TypeError(f"expected a JSON object, received {type(raw).__name__}")
+            validated = output_schema.model_validate(raw)
+            return validated.model_dump(mode="json"), serving_client, provider_name
+        except (ValidationError, TypeError) as exc:
+            last_error = exc
+            logger.warning(
+                "%s schema validation failed on attempt %d/%d via %s: %s",
+                output_schema.__name__,
+                attempt,
+                max_schema_attempts,
+                provider_name,
+                exc,
+            )
+            if attempt < max_schema_attempts:
+                if isinstance(exc, ValidationError):
+                    details = json.dumps(exc.errors(include_url=False), default=str)
+                else:
+                    details = str(exc)
+                prompt = (
+                    user_prompt
+                    + "\n\n## Response correction required\n"
+                    + "Your previous JSON response failed the required schema. "
+                    + "Return a corrected JSON object only. Validation errors: "
+                    + details
+                )
+
+    raise RuntimeError(
+        f"{output_schema.__name__} generation failed schema validation after "
+        f"{max_schema_attempts} attempts: {last_error}"
+    ) from last_error
 
 
 def _repair_json(raw: str) -> dict | None:

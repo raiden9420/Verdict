@@ -1,121 +1,295 @@
 "use client";
 
-import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   PButton,
   PButtonPure,
   PIcon,
   PTag,
   PText,
-  PWordmark,
 } from '@porsche-design-system/components-react';
-import { uploadPaper, startAudit } from "@/lib/api";
+import { startAudit, uploadPaper, UploadError } from "@/lib/api";
 import { ROUND_TOPICS } from "@/types";
-import { useSSE } from "@/hooks/useSSE";
+import { useSSE, type UseSSEResult } from "@/hooks/useSSE";
 import DocumentViewer from "@/components/DocumentViewer";
-import type { Turn } from "@/types";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import type { AuditStatus, DebriefCard, ReproducibilitySignals, Turn, Verdict } from "@/types";
 
-type View = 'setup' | 'arena' | 'report';
-type DepthOption = 'fast' | 'deep' | 'exhaustive';
+type View = 'setup' | 'arena';
+
+const ACTIVE_AUDIT_KEY = "verdict_active_audit";
+const TOTAL_EXCHANGES = 3;
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface ActiveAudit {
+  auditId: string;
+  paperId: string;
+  filename: string;
+}
+
+interface PreparedPaper {
+  paperId: string;
+  filename: string;
+  fileKey: string;
+}
+
+interface RelevancePrompt {
+  message: string;
+  reason?: string;
+}
+
+function readActiveAudit(): ActiveAudit | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_AUDIT_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<ActiveAudit>;
+    if (
+      typeof value.auditId !== "string" ||
+      typeof value.paperId !== "string" ||
+      typeof value.filename !== "string" ||
+      !UUID_PATTERN.test(value.auditId) ||
+      !UUID_PATTERN.test(value.paperId)
+    ) {
+      localStorage.removeItem(ACTIVE_AUDIT_KEY);
+      return null;
+    }
+    return value as ActiveAudit;
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveAudit(audit: ActiveAudit): void {
+  try {
+    localStorage.setItem(ACTIVE_AUDIT_KEY, JSON.stringify(audit));
+  } catch {
+    // Persistence is a recovery aid; an unavailable storage API must not block an audit.
+  }
+}
+
+function fileKey(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function userFacingError(error: unknown, fallback: string): string {
+  if (error instanceof TypeError) {
+    return "The audit service could not be reached. Check your connection and try again.";
+  }
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 export default function App() {
   const [view, setView] = useState<View>('setup');
+  const [restoringAudit, setRestoringAudit] = useState(true);
 
   // Setup state
   const [topic, setTopic] = useState<string>(ROUND_TOPICS[0].slug);
-  const [depth, setDepth] = useState<DepthOption>('deep');
 
   const [file, setFile] = useState<File | null>(null);
-  const [uploadNotice, setUploadNotice] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [relevancePrompt, setRelevancePrompt] = useState<RelevancePrompt | null>(null);
+  const [preparedPaper, setPreparedPaper] = useState<PreparedPaper | null>(null);
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Audit state
-  const [auditId, setAuditId] = useState<string | null>(null);
-  const [paperId, setPaperId] = useState<string | null>(null);
-  const [activeRound, setActiveRound] = useState(2);
-  const [showDebrief, setShowDebrief] = useState(true);
+  const [activeAudit, setActiveAudit] = useState<ActiveAudit | null>(null);
+  const [showDebrief, setShowDebrief] = useState(false);
+  const auditStream = useSSE(activeAudit?.auditId ?? null);
+  const auditRunning = Boolean(activeAudit && auditStream.status === "in_progress");
+
+  useEffect(() => {
+    const restoreTimer = window.setTimeout(() => {
+      const restored = readActiveAudit();
+      if (restored) {
+        setActiveAudit(restored);
+        setView("arena");
+      }
+      setRestoringAudit(false);
+    }, 0);
+    return () => window.clearTimeout(restoreTimer);
+  }, []);
 
   const selectedDescription = useMemo(() => {
     const selectedTopic = ROUND_TOPICS.find((t) => t.slug === topic);
-    const topicDesc = selectedTopic ? selectedTopic.description : '';
-    const effort = depth === 'exhaustive' ? 'line-by-line evidence checks across five rounds' : depth === 'deep' ? 'a comprehensive review across the core dimensions' : 'a fast scan of the highest-risk areas';
-    return `The audit will evaluate: ${topicDesc} with ${effort}.`;
-  }, [topic, depth]);
+    return selectedTopic?.description || '';
+  }, [topic]);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = e.target.files?.[0];
-    if (selected) {
-      setFile(selected);
-      setUploadNotice(true);
+  const selectFile = (selected?: File) => {
+    setUploadError(null);
+    setRelevancePrompt(null);
+    setPreparedPaper(null);
+    if (!selected) return;
+
+    const looksLikePdf =
+      selected.type === "application/pdf" || selected.name.toLowerCase().endsWith(".pdf");
+    if (!looksLikePdf) {
+      setFile(null);
+      setUploadError("Choose a PDF file. Other document formats cannot be audited.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
     }
+    if (selected.size > MAX_UPLOAD_BYTES) {
+      setFile(null);
+      setUploadError("This PDF is larger than 20 MB. Choose a smaller research paper.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setFile(selected);
   };
 
-  const launchAudit = async () => {
-    if (!file || !topic) return;
-    setLoading(true);
-    try {
-      const paper = await uploadPaper(file);
-      setPaperId(paper.paper_id);
-      const audit = await startAudit(paper.paper_id, topic);
-      setAuditId(audit.audit_id);
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    selectFile(event.target.files?.[0]);
+  };
 
+  const removeDocument = () => {
+    setFile(null);
+    setPreparedPaper(null);
+    setRelevancePrompt(null);
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const launchAudit = async (force = false) => {
+    if (!file || !topic || loading) return;
+    if (auditRunning) {
+      setUploadError("An audit is already running. Let it finish before launching another one.");
+      return;
+    }
+
+    setLoading(true);
+    setUploadError(null);
+    try {
+      const selectedFileKey = fileKey(file);
+      let acceptedPaper = preparedPaper?.fileKey === selectedFileKey
+        ? preparedPaper
+        : null;
+      if (!acceptedPaper) {
+        const paper = await uploadPaper(file, force);
+        acceptedPaper = {
+          paperId: paper.paper_id,
+          filename: paper.filename,
+          fileKey: selectedFileKey,
+        };
+        setPreparedPaper(acceptedPaper);
+      }
+      const audit = await startAudit(acceptedPaper.paperId, topic);
+      const nextAudit = {
+        auditId: audit.audit_id,
+        paperId: acceptedPaper.paperId,
+        filename: acceptedPaper.filename,
+      };
+      saveActiveAudit(nextAudit);
+      setActiveAudit(nextAudit);
       setView('arena');
-      setActiveRound(2);
+      setShowDebrief(false);
+      setPreparedPaper(null);
+      setRelevancePrompt(null);
     } catch (error) {
-      console.error(error);
-      alert('Failed to launch audit');
+      if (!force && error instanceof UploadError && error.relevanceFailed) {
+        setRelevancePrompt({ message: error.message, reason: error.reason });
+      } else {
+        if (force) setRelevancePrompt(null);
+        setUploadError(userFacingError(error, "The audit could not be launched."));
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  const changeDocument = useCallback(() => {
+    setRelevancePrompt(null);
+    setUploadError(null);
+    setFile(null);
+    setPreparedPaper(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    window.requestAnimationFrame(() => fileInputRef.current?.click());
+  }, []);
+
+  const beginNewAudit = () => {
+    if (auditRunning) return;
+    try {
+      localStorage.removeItem(ACTIVE_AUDIT_KEY);
+    } catch {
+      // A blocked storage API should not prevent starting another audit.
+    }
+    setActiveAudit(null);
+    setView('setup');
+    setShowDebrief(false);
+    removeDocument();
+  };
+
+  const workspacePaperName = view === 'arena'
+    ? activeAudit?.filename
+    : file?.name || activeAudit?.filename;
+
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className="topbar" inert={relevancePrompt ? true : undefined}>
         <div className="brand-lockup">
           <span className="verdict-wordmark">Verdict</span>
           <span className="brand-divider" />
           <span className="product-name">ADVERSARIAL AUDIT</span>
         </div>
         <div className="topbar-meta">
-          <PButtonPure icon="menu-dots-horizontal" aria-label="More options" />
+          <span className="trust-mark"><PIcon name="check" /> Evidence-grounded</span>
+          <ThemeToggle />
         </div>
       </header>
 
-      <aside className="sidebar">
+      <aside className="sidebar" inert={relevancePrompt ? true : undefined}>
         <div className="sidebar-label">Audit workspace</div>
         <nav className="side-nav" aria-label="Audit stages">
-          <button className={`nav-item ${view === 'setup' ? 'active' : ''}`} onClick={() => setView('setup')}>
+          <button
+            type="button"
+            className={`nav-item ${view === 'setup' ? 'active' : ''}`}
+            onClick={() => setView('setup')}
+            disabled={loading || restoringAudit}
+            aria-current={view === 'setup' ? 'page' : undefined}
+          >
             <span className="nav-index">01</span><span>Configure audit</span>
           </button>
-          <button className={`nav-item ${view === 'arena' ? 'active' : ''}`} onClick={() => { if (auditId) setView('arena'); }}>
-            <span className="nav-index">02</span><span>Live arena</span>{view === 'arena' && <span className="nav-live">LIVE</span>}
-          </button>
-          <button className={`nav-item ${view === 'report' ? 'active' : ''}`} onClick={() => { if (auditId) setView('report'); }}>
-            <span className="nav-index">03</span><span>Final report</span>
+          <button
+            type="button"
+            className={`nav-item ${view === 'arena' ? 'active' : ''}`}
+            onClick={() => setView('arena')}
+            disabled={!activeAudit || loading || restoringAudit}
+            aria-current={view === 'arena' ? 'page' : undefined}
+          >
+            <span className="nav-index">02</span><span>Audit results</span>
+            {view === 'arena' && auditStream.status === 'in_progress' && auditStream.connectionState === 'live' && <span className="nav-live">LIVE</span>}
           </button>
         </nav>
         <div className="sidebar-footer">
           <div className="mini-label">CURRENT PAPER</div>
-          <div className="paper-mini"><PIcon name="document" /><span>{file ? file.name : 'No paper selected'}</span></div>
-          <div className="paper-mini-meta">{file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : ''}</div>
+          <div className="paper-mini"><PIcon name="document" /><span>{workspacePaperName || 'No paper selected'}</span></div>
+          <div className="paper-mini-meta">{view === 'setup' && file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : ''}</div>
         </div>
       </aside>
 
-      <main className="main-content">
-        {view === 'setup' && (
+      <main className="main-content" inert={relevancePrompt ? true : undefined}>
+        {restoringAudit && (
+          <div className="workspace-loading" role="status">
+            <span className="loading-mark" aria-hidden="true" />
+            <strong>Restoring audit workspace</strong>
+            <span>Checking for an active audit in this browser session.</span>
+          </div>
+        )}
+        {!restoringAudit && view === 'setup' && (
           <SetupView
             file={file}
             topic={topic}
             setTopic={setTopic}
-            depth={depth}
-            setDepth={setDepth}
             selectedDescription={selectedDescription}
-            uploadNotice={uploadNotice}
             onUpload={() => fileInputRef.current?.click()}
-            onLaunch={launchAudit}
+            onFileDrop={selectFile}
+            onRemove={removeDocument}
+            onLaunch={() => { void launchAudit(); }}
             loading={loading}
+            uploadError={uploadError}
+            auditRunning={auditRunning}
           />
         )}
         <input
@@ -123,31 +297,70 @@ export default function App() {
           type="file"
           accept=".pdf"
           onChange={handleFileSelect}
-          style={{ display: "none" }}
+          className="file-input"
         />
 
-        {view === 'arena' && auditId && paperId && (
+        {!restoringAudit && view === 'arena' && activeAudit && (
           <ArenaView
-            auditId={auditId}
-            paperId={paperId}
-            activeRound={activeRound}
+            paperId={activeAudit.paperId}
+            stream={auditStream}
             showDebrief={showDebrief}
             setShowDebrief={setShowDebrief}
-            onReport={() => setView('report')}
+            paperName={activeAudit.filename}
+            onNewAudit={beginNewAudit}
           />
         )}
-        {view === 'report' && <ReportView onBack={() => setView('arena')} />}
       </main>
+
+      {relevancePrompt && (
+        <RelevanceDialog
+          prompt={relevancePrompt}
+          loading={loading}
+          onChangeDocument={changeDocument}
+          onProceed={() => {
+            void launchAudit(true);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function SetupView({ file, topic, setTopic, depth, setDepth, selectedDescription, uploadNotice, onUpload, onLaunch, loading }: any) {
-  const options = ROUND_TOPICS.map((t) => [t.slug, t.name, t.description]);
+interface SetupViewProps {
+  file: File | null;
+  topic: string;
+  setTopic: (topic: string) => void;
+  selectedDescription: string;
+  onUpload: () => void;
+  onFileDrop: (file?: File) => void;
+  onRemove: () => void;
+  onLaunch: () => void;
+  loading: boolean;
+  uploadError: string | null;
+  auditRunning: boolean;
+}
 
-  return <div className="setup-page">
+function SetupView({
+  file,
+  topic,
+  setTopic,
+  selectedDescription,
+  onUpload,
+  onFileDrop,
+  onRemove,
+  onLaunch,
+  loading,
+  uploadError,
+  auditRunning,
+}: SetupViewProps) {
+  const options = ROUND_TOPICS.map(
+    (round): readonly [string, string, string] => [round.slug, round.name, round.description],
+  );
+
+  return <div className="setup-page" aria-busy={loading}>
+    <span className="visually-hidden" role="status" aria-live="polite">{loading ? "Validating the paper and starting the audit." : ""}</span>
     <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH INTEGRITY / NEW AUDIT</div>
-    <div className="setup-heading"><div><h1>Interrogate the<br /><em>uncomfortable.</em></h1><PText size="medium">A multi-agent review that goes beyond the abstract.<br />Find the gaps before someone else does.</PText></div><div className="heading-mark"><span>AI</span><span>×</span><span>∞</span></div></div>
+    <div className="setup-heading"><div><h1>Put every claim<br /><em>under pressure.</em></h1><PText size="medium">Three evidence-grounded exchanges expose weak claims,<br />test the defense, and deliver a final verdict.</PText></div></div>
 
     <section className="paper-card">
       <div className="section-kicker">01 — Source document</div>
@@ -156,212 +369,545 @@ function SetupView({ file, topic, setTopic, depth, setDepth, selectedDescription
           <div className="paper-icon"><PIcon name="document" /></div>
           <div className="paper-details"><strong>{file.name}</strong><span>PDF · {(file.size / (1024 * 1024)).toFixed(1)} MB</span></div>
           <PTag variant="secondary" icon="check">Ready to audit</PTag>
-          <PButtonPure icon="close" aria-label="Remove document" onClick={() => { }} />
+          <PButtonPure icon="close" aria-label="Remove document" onClick={onRemove} disabled={loading} />
         </div>
       ) : (
-        <button className="upload-zone" onClick={onUpload}><PIcon name="upload" /><span>Drop paper here or <u>browse files</u></span></button>
+        <button
+          type="button"
+          className="upload-zone"
+          onClick={onUpload}
+          disabled={loading}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            onFileDrop(event.dataTransfer.files?.[0]);
+          }}
+          aria-describedby="upload-requirements"
+        >
+          <span className="upload-icon"><PIcon name="upload" /></span>
+          <span><strong>Choose a research paper</strong><small id="upload-requirements">Drop a PDF here or browse · up to 20 MB</small></span>
+        </button>
       )}
-      {uploadNotice && <div className="upload-confirm"><PIcon name="check" /> Document selected. Ready to configure.</div>}
+      {uploadError && <div className="setup-error" role="alert"><PIcon name="error-filled" /> <span>{uploadError}</span></div>}
     </section>
 
     <section className="config-section">
-      <div className="section-kicker">02 — Configure the pressure</div>
-      <div className="config-grid">
-        <OptionGroup label="Round Topic" value={topic} setValue={setTopic} options={options} />
-        <OptionGroup label="Depth of analysis" value={depth} setValue={setDepth} options={[
-          ['fast', 'Fast audit', 'Highest-risk areas · 1–2 rounds'], ['deep', 'Deep review', 'All core dimensions · 3–4 rounds'], ['exhaustive', 'Exhaustive breakdown', 'Line-by-line validation · 5+ rounds']
-        ]} />
-      </div>
+      <div className="section-kicker">02 — Choose the audit focus</div>
+      <OptionGroup label="Research dimension" value={topic} setValue={setTopic} options={options} disabled={loading} />
       <div className="selection-note"><span className="pulse-dot" /> {selectedDescription}</div>
     </section>
 
-    <div className="launch-row"><div><span className="small-muted">ESTIMATED RUN TIME</span><strong>~ 08 min</strong></div><PButton onClick={onLaunch} icon="arrow-right" iconSource="local" loading={loading} disabled={!file || !topic || loading}>Launch adversarial audit</PButton></div>
+    <div className="launch-row"><div><span className="small-muted">AUDIT PLAN</span><strong>3 exchanges · grounded verdicts · final debrief</strong></div><PButton type="button" onClick={onLaunch} icon="arrow-right" loading={loading} disabled={!file || !topic || loading || auditRunning}>Launch adversarial audit</PButton></div>
   </div>;
 }
 
-function OptionGroup({ label, value, setValue, options }: { label: string; value: string; setValue: (value: any) => void; options: any[][] }) {
-  return <div className="option-group"><label>{label}</label><div className="option-list">{options.map(([id, title, desc]) => <button key={id} className={`option-card ${value === id ? 'selected' : ''}`} onClick={() => setValue(id)}><span className="radio-dot" /><span className="option-copy"><strong>{title}</strong><small>{desc}</small></span>{value === id && <PIcon name="check" />}</button>)}</div></div>;
+function OptionGroup<OptionValue extends string>({
+  label,
+  value,
+  setValue,
+  options,
+  disabled = false,
+}: {
+  label: string;
+  value: OptionValue;
+  setValue: (value: OptionValue) => void;
+  options: ReadonlyArray<readonly [OptionValue, string, string]>;
+  disabled?: boolean;
+}) {
+  const groupName = useId();
+  return <fieldset className="option-group" disabled={disabled}><legend>{label}</legend><div className="option-list">{options.map(([id, title, desc]) => <label key={id} className={`option-card ${value === id ? 'selected' : ''}`}><input className="option-radio visually-hidden" type="radio" name={groupName} value={id} checked={value === id} onChange={() => setValue(id)} /><span className="radio-dot" aria-hidden="true" /><span className="option-copy"><strong>{title}</strong><small>{desc}</small></span>{value === id && <PIcon name="check" />}</label>)}</div></fieldset>;
 }
 
-function ArenaView({ auditId, paperId, activeRound, showDebrief, setShowDebrief, onReport }: any) {
-  const { turns, verdicts, debrief, skippedExchanges, processMessage, status } = useSSE(auditId);
+function RelevanceDialog({
+  prompt,
+  loading,
+  onChangeDocument,
+  onProceed,
+}: {
+  prompt: RelevancePrompt;
+  loading: boolean;
+  onChangeDocument: () => void;
+  onProceed: () => void;
+}) {
+  const changeButtonRef = useRef<HTMLElement>(null);
+  const proceedButtonRef = useRef<HTMLElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const loadingRef = useRef(loading);
 
-  const [highlightedPages] = useState<number[]>([]);
+  useEffect(() => {
+    loadingRef.current = loading;
+    if (loading) dialogRef.current?.focus();
+  }, [loading]);
 
-  // Calculate highlighted pages based on turns (similar to old UI)
-  const autoHighlightPages = useMemo(() => {
-    const lastNonValidatorTurn = [...turns]
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const focusFrame = window.requestAnimationFrame(() => changeButtonRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !loadingRef.current) {
+        event.preventDefault();
+        onChangeDocument();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [changeButtonRef.current, proceedButtonRef.current]
+        .filter((element): element is HTMLElement => Boolean(element && !element.hasAttribute("disabled")));
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, [onChangeDocument]);
+
+  return (
+    <div className="dialog-backdrop">
+      <div
+        ref={dialogRef}
+        className="relevance-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="relevance-dialog-title"
+        aria-describedby="relevance-dialog-description"
+        aria-busy={loading}
+        tabIndex={-1}
+      >
+        <div className="dialog-icon"><PIcon name="warning" /></div>
+        <div>
+          <div className="section-kicker">RESEARCH VALIDATION</div>
+          <h2 id="relevance-dialog-title">This may not be a research paper.</h2>
+          <p id="relevance-dialog-description">{prompt.message}</p>
+          {prompt.reason && prompt.reason !== prompt.message && (
+            <p className="dialog-reason"><strong>Why it was flagged:</strong> {prompt.reason}</p>
+          )}
+        </div>
+        <div className="dialog-actions">
+          <PButton ref={changeButtonRef} type="button" variant="secondary" onClick={onChangeDocument} disabled={loading}>Change document</PButton>
+          <PButton ref={proceedButtonRef} type="button" onClick={onProceed} loading={loading} disabled={loading}>Proceed anyway</PButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ArenaViewProps {
+  paperId: string;
+  paperName: string;
+  stream: UseSSEResult;
+  showDebrief: boolean;
+  setShowDebrief: (show: boolean) => void;
+  onNewAudit: () => void;
+}
+
+function ArenaView({ paperId, paperName, stream, showDebrief, setShowDebrief, onNewAudit }: ArenaViewProps) {
+  const {
+    turns,
+    verdicts,
+    debrief,
+    processMessage,
+    status,
+    connectionState,
+    auditError,
+    transportError,
+  } = stream;
+
+  const displayedTurns = useMemo(() => selectDisplayTurns(turns), [turns]);
+  const feedRef = useRef<HTMLDivElement>(null);
+  const followFeedRef = useRef(true);
+  const adjudicatedExchanges = useMemo(
+    () => new Set(verdicts.map((verdict) => verdict.exchange_number)).size,
+    [verdicts],
+  );
+  const latestExchange = turns.reduce(
+    (latest, turn) => Math.max(latest, turn.exchange_number),
+    1,
+  );
+  const activeExchange = status === "completed"
+    ? TOTAL_EXCHANGES
+    : Math.min(TOTAL_EXCHANGES, Math.max(latestExchange, adjudicatedExchanges + 1));
+
+  const highlightedPages = useMemo(() => {
+    const latestCitedTurn = [...displayedTurns]
       .reverse()
-      .find((t) => t.agent_type !== "validator" && (t.content.cited_chunk_ids?.length ?? 0) > 0);
+      .find((turn) => (turn.content.cited_chunk_ids?.length ?? 0) > 0);
+    if (!latestCitedTurn) return [];
 
-    if (!lastNonValidatorTurn) return [];
-
-    const chunkIds = lastNonValidatorTurn.content.cited_chunk_ids || [];
+    const citedIds = latestCitedTurn.content.cited_chunk_ids || [];
     const pages = new Set<number>();
-    for (const turn of turns) {
-      if (turn.agent_type === "validator" && turn.content) {
-        const validations = [
-          ...(turn.content.attacker_validations || []),
-          ...(turn.content.defender_validations || []),
-        ];
-        for (const v of validations) {
-          if (chunkIds.includes(v.chunk_id) && v.page_number) {
-            pages.add(v.page_number);
-          }
+    for (const validator of turns.filter((turn) => turn.agent_type === "validator")) {
+      const validations = [
+        ...(validator.content.attacker_validations || []),
+        ...(validator.content.defender_validations || []),
+      ];
+      for (const validation of validations) {
+        if (
+          validation.chunk_id &&
+          citedIds.includes(validation.chunk_id) &&
+          typeof validation.page_number === "number"
+        ) {
+          pages.add(validation.page_number);
         }
       }
     }
-    return [...pages];
-  }, [turns]);
+    return [...pages].sort((left, right) => left - right);
+  }, [displayedTurns, turns]);
 
-  const effectiveHighlightedPages = highlightedPages.length > 0 ? highlightedPages : autoHighlightPages;
+  useEffect(() => {
+    if (!followFeedRef.current || !feedRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [displayedTurns.length, processMessage]);
 
-  return <div className="arena-page">
-    <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" /> LIVE AUDIT / IN PROGRESS</div><h1>Adversarial arena</h1></div><div className="header-actions"></div></div>
-    <div className="round-strip"><div className="round-progress"><span className="progress-complete" /><span className="progress-complete" /><span className="progress-active" /><span /><span /></div><div><strong>ROUND {String(activeRound + 1).padStart(2, '0')} OF 06</strong><span>Audit Execution</span></div><div></div></div>
-    <div className="arena-grid">
-      <section className="document-panel">
-        <DocumentViewer
-          paperId={paperId}
-          highlightedPages={effectiveHighlightedPages}
-        />
-      </section>
+  const statusLabel = status === "completed"
+    ? "Completed"
+    : status === "error"
+      ? "Failed"
+      : connectionState === "live"
+        ? "Live"
+        : connectionState === "connecting"
+          ? "Connecting"
+          : connectionState === "reconnecting"
+            ? "Reconnecting"
+            : connectionState === "polling"
+              ? "Syncing"
+              : "Starting";
+  const statusTone = status === "completed"
+    ? "complete"
+    : status === "error"
+      ? "failed"
+      : connectionState === "live"
+        ? "live"
+        : "connecting";
 
-      <section className="debate-panel">
-        <div className="panel-top"><span className="panel-title"><span className="live-bars"><i /><i /><i /></span> LIVE DEBATE</span><span>{status}</span></div>
-        <div className="agent-feed">
-          {processMessage && (
-            <div style={{
-              padding: '0.65rem 0.9rem',
-              background: 'rgba(59, 130, 246, 0.1)',
-              border: '1px solid rgba(59, 130, 246, 0.3)',
-              borderRadius: '6px',
-              color: '#60a5fa',
-              fontSize: '0.85rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem',
-              margin: '0.5rem 0'
-            }}>
-              <span>🌐</span>
-              <span>{processMessage}</span>
-            </div>
-          )}
-
-          {turns.map((turn, index) => {
-            return (
-              <span key={turn.id || index}>
-                <AgentMessage
-                  turn={turn}
-                  allTurns={turns}
-                  role={turn.agent_type.toUpperCase()}
-                  time={turn.created_at ? new Date(turn.created_at).toLocaleTimeString() : ''}
-                  tone={turn.agent_type}
-                  text={turn.content.critique_text || turn.content.rebuttal_text || turn.content.rationale || turn.content.claim_summary || ''}
-                  cite={turn.content.cited_chunk_ids?.length ? 'In-document Citations Provided' : ''}
-                />
-              </span>
-            );
-          })}
-          {/* Render skip notices for any exchanges that were skipped */}
-          {skippedExchanges.map((exchangeNum) => (
-            <article key={`skip-${exchangeNum}`} className="agent-message skipped">
-              <div className="message-meta">
-                <span className="agent-avatar">⊘</span>
-                <strong>EXCHANGE {exchangeNum} SKIPPED</strong>
-                <PTag variant="secondary">SKIPPED</PTag>
-              </div>
-              <p>This exchange was skipped — the Attacker couldn&apos;t produce a grounded critique after retries.</p>
-            </article>
-          ))}
-          {status === 'in_progress' && (
-            <div className="typing"><span className="typing-avatar">AI</span><span>Agent is formulating a response</span><i /><i /><i /></div>
-          )}
+  return (
+    <div className="arena-page">
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {status === "completed"
+          ? debrief
+            ? "Audit complete. All three exchange verdicts and the final debrief are available."
+            : transportError
+              ? "Audit complete. All three exchange verdicts are available, but the final debrief could not be loaded."
+              : "Audit complete. All three exchange verdicts are available. The final debrief is loading."
+          : status === "error"
+            ? "The audit stopped before completion."
+            : `${statusLabel}. ${adjudicatedExchanges} of ${TOTAL_EXCHANGES} exchanges adjudicated.`}
+      </p>
+      <div className="page-header">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-line" /> AUDIT / {statusLabel.toUpperCase()}</div>
+          <h1>Adversarial arena</h1>
+          <p className="page-subtitle"><PIcon name="document" /> {paperName}</p>
         </div>
-      </section>
-    </div>
+      </div>
 
-    <section className={`debrief-card ${showDebrief ? 'open' : ''}`}><button className="debrief-header" onClick={() => setShowDebrief(!showDebrief)}><span><PIcon name="chart" /><strong>Round debrief</strong>{debrief ? <PTag variant="success">Final</PTag> : <PTag variant="warning">Provisional</PTag>}</span><span className="debrief-toggle">{showDebrief ? 'Collapse' : 'Expand'} <PIcon name={showDebrief ? 'arrow-up' : 'arrow-down'} /></span></button>{showDebrief && <div className="debrief-body">
-      <div className="synthesis"><span className="small-muted">EXECUTIVE SYNTHESIS</span><p>{debrief?.executive_synthesis || 'Debrief will be generated at the end of the round.'}</p></div>
-      {debrief?.reproducibility_checklist && (
-        <div className="reproducibility-checklist" style={{ margin: '1rem 0', padding: '0.85rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-          <span className="small-muted" style={{ display: 'block', marginBottom: '0.6rem', fontWeight: 600, color: '#e5e7eb', letterSpacing: '0.05em' }}>
-            📋 REPRODUCIBILITY CHECKLIST (DETERMINISTIC INGESTION SCAN)
-          </span>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem', fontSize: '0.85rem' }}>
-            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
-              <span>Code / Repository: </span>
-              <strong style={{ color: debrief.reproducibility_checklist.code_available ? '#4ade80' : '#f87171' }}>
-                {debrief.reproducibility_checklist.code_available ? '✓ Disclosed' : '✗ Missing'}
-              </strong>
-              {debrief.reproducibility_checklist.code_details?.length ? (
-                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.2rem' }}>
-                  {debrief.reproducibility_checklist.code_details.slice(0, 2).join(', ')}
-                </div>
-              ) : null}
+      <div className="round-strip">
+        <div
+          className="round-progress"
+          role="progressbar"
+          aria-label="Audit exchanges adjudicated"
+          aria-valuemin={0}
+          aria-valuemax={TOTAL_EXCHANGES}
+          aria-valuenow={adjudicatedExchanges}
+          aria-valuetext={`${adjudicatedExchanges} of ${TOTAL_EXCHANGES} exchanges adjudicated`}
+        >
+          {Array.from({ length: TOTAL_EXCHANGES }, (_, index) => {
+            const exchange = index + 1;
+            const progressClass = exchange <= adjudicatedExchanges
+              ? "progress-complete"
+              : exchange === activeExchange && status === "in_progress"
+                ? "progress-active"
+                : "";
+            return <span key={exchange} className={progressClass} />;
+          })}
+        </div>
+        <div>
+          <strong>EXCHANGE {String(activeExchange).padStart(2, "0")} OF 03</strong>
+          <span>{adjudicatedExchanges} adjudicated</span>
+        </div>
+        <span className={`audit-status ${statusTone}`}><i aria-hidden="true" /> {statusLabel}</span>
+      </div>
+
+      {auditError && (
+        <div className="pipeline-alert error" role="alert">
+          <PIcon name="error-filled" />
+          <div><strong>Audit stopped</strong><span>{auditError}</span></div>
+        </div>
+      )}
+      {transportError && status !== "error" && (
+        <div className="pipeline-alert recovery" role="status">
+          <PIcon name="information" />
+          <div><strong>{status === "completed" ? "Final debrief unavailable" : "Live updates delayed"}</strong><span>{transportError}</span></div>
+        </div>
+      )}
+
+      <div className="arena-grid">
+        <section className="document-panel">
+          <DocumentViewer key={paperId} paperId={paperId} highlightedPages={highlightedPages} />
+        </section>
+
+        <section className="debate-panel">
+          <div className="panel-top">
+            <span className="panel-title">
+              {status === "in_progress" ? <span className="live-bars" aria-hidden="true"><i /><i /><i /></span> : <PIcon name={status === "completed" ? "check" : "warning"} />}
+              {status === "in_progress" ? "LIVE AUDIT TRANSCRIPT" : "AUDIT TRANSCRIPT"}
+            </span>
+            <span>{statusLabel.toUpperCase()}</span>
+          </div>
+          <div
+            ref={feedRef}
+            className="agent-feed"
+            role="log"
+            aria-label="Audit transcript"
+            aria-live="polite"
+            tabIndex={0}
+            onScroll={(event) => {
+              const feed = event.currentTarget;
+              followFeedRef.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+            }}
+          >
+            {processMessage && (
+              <div className="process-update" role="status">
+                <PIcon name="globe" /><span>{processMessage}</span>
+              </div>
+            )}
+
+            {displayedTurns.map((turn) => (
+              <AgentMessage
+                key={turn.id || `${turn.exchange_number}-${turn.sequence}-${turn.agent_type}`}
+                turn={turn}
+                allTurns={turns}
+                role={turn.agent_type.toUpperCase()}
+                time={turn.created_at ? new Date(turn.created_at).toLocaleTimeString() : ''}
+                tone={turn.agent_type}
+                text={turn.content.critique_text || turn.content.rebuttal_text || turn.content.rationale || turn.content.claim_summary || ''}
+                cite={turn.content.cited_chunk_ids?.length ? 'In-document citations provided' : ''}
+              />
+            ))}
+
+            {status === 'in_progress' && (
+              <div className="typing"><span className="typing-avatar">AI</span><span>Agent is formulating a response</span><i /><i /><i /></div>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <ExchangeVerdicts verdicts={verdicts} status={status} />
+      <DebriefPanel
+        debrief={debrief}
+        status={status}
+        open={showDebrief}
+        onToggle={() => setShowDebrief(!showDebrief)}
+      />
+
+      <div className="arena-bottom">
+        <span><PIcon name="clock" /> {status === "completed" ? "All three exchanges adjudicated" : status === "error" ? "Audit stopped before completion" : `Exchange ${activeExchange} is running`}</span>
+        {status !== "in_progress" && <PButton type="button" variant="secondary" icon="reset" onClick={onNewAudit}>Start a new audit</PButton>}
+      </div>
+    </div>
+  );
+}
+
+function ReproducibilityChecklist({ signals }: { signals: ReproducibilitySignals }) {
+  const checks = [
+    ["Code / repository", signals.code_available, signals.code_details],
+    ["Dataset availability", signals.data_available, signals.data_details],
+    ["Hyperparameters", signals.hyperparameters_disclosed, signals.hyperparameter_details],
+    ["Compute / hardware", signals.compute_disclosed, signals.compute_details],
+    ["Random seed", signals.seed_disclosed, signals.seed_details],
+  ] as const;
+
+  return (
+    <div className="reproducibility-checklist">
+      <span className="small-muted">REPRODUCIBILITY CHECKLIST</span>
+      <div className="reproducibility-grid">
+        {checks.map(([label, disclosed, details]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong className={disclosed ? "disclosed" : "missing"}>{disclosed ? "Disclosed" : "Missing"}</strong>
+            {details?.length ? <small>{details.slice(0, 3).join(', ')}</small> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DebriefPanel({
+  debrief,
+  status,
+  open,
+  onToggle,
+}: {
+  debrief: DebriefCard | null;
+  status: AuditStatus;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const fallback = status === "error"
+    ? "No final debrief was produced because the audit failed."
+    : "The final debrief will appear after all three exchanges are adjudicated.";
+
+  return (
+    <section className={`debrief-card ${open ? 'open' : ''}`}>
+      <button type="button" className="debrief-header" onClick={onToggle} aria-expanded={open} aria-controls="final-debrief-content">
+        <span><PIcon name="chart" /><strong>Final debrief</strong>{debrief ? <PTag variant="success">Final</PTag> : status === "error" ? <PTag variant="error">Unavailable</PTag> : <PTag variant="warning">Pending</PTag>}</span>
+        <span className="debrief-toggle">{open ? 'Collapse' : 'Expand'} <PIcon name={open ? 'arrow-up' : 'arrow-down'} /></span>
+      </button>
+      {open && (
+        <div className="debrief-body" id="final-debrief-content" role="region" aria-label="Final audit debrief">
+          <div className="synthesis"><span className="small-muted">FINAL EXECUTIVE SYNTHESIS</span><p>{debrief?.executive_synthesis || fallback}</p></div>
+          {debrief?.reproducibility_checklist && <ReproducibilityChecklist signals={debrief.reproducibility_checklist} />}
+          <div className="debrief-columns">
+            <div>
+              <span className="debrief-label strength">SOLIDIFIED STRENGTHS</span>
+              {debrief?.solidified_strengths?.map((strength, index) => <p key={index}><PIcon name="check" /> {strength}</p>)}
             </div>
-            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
-              <span>Dataset Availability: </span>
-              <strong style={{ color: debrief.reproducibility_checklist.data_available ? '#4ade80' : '#f87171' }}>
-                {debrief.reproducibility_checklist.data_available ? '✓ Disclosed' : '✗ Missing'}
-              </strong>
+            <div>
+              <span className="debrief-label weakness">ACTIONABLE WEAKNESSES</span>
+              {debrief?.actionable_weaknesses?.map((weakness, index) => <p key={index}><PIcon name="error-filled" /> {weakness}</p>)}
             </div>
-            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
-              <span>Hyperparameters: </span>
-              <strong style={{ color: debrief.reproducibility_checklist.hyperparameters_disclosed ? '#4ade80' : '#f87171' }}>
-                {debrief.reproducibility_checklist.hyperparameters_disclosed ? '✓ Disclosed' : '✗ Missing'}
-              </strong>
-              {debrief.reproducibility_checklist.hyperparameter_details?.length ? (
-                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.2rem' }}>
-                  Disclosed: {debrief.reproducibility_checklist.hyperparameter_details.slice(0, 3).join(', ')}
-                </div>
-              ) : null}
-            </div>
-            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px' }}>
-              <span>Compute / Hardware: </span>
-              <strong style={{ color: debrief.reproducibility_checklist.compute_disclosed ? '#4ade80' : '#f87171' }}>
-                {debrief.reproducibility_checklist.compute_disclosed ? '✓ Disclosed' : '✗ Missing'}
-              </strong>
-              {debrief.reproducibility_checklist.compute_details?.length ? (
-                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.2rem' }}>
-                  Disclosed: {debrief.reproducibility_checklist.compute_details.slice(0, 3).join(', ')}
-                </div>
-              ) : null}
-            </div>
-            <div style={{ background: 'rgba(0,0,0,0.25)', padding: '0.5rem 0.75rem', borderRadius: '4px', gridColumn: 'span 2' }}>
-              <span>Random Seed: </span>
-              <strong style={{ color: debrief.reproducibility_checklist.seed_disclosed ? '#4ade80' : '#f87171' }}>
-                {debrief.reproducibility_checklist.seed_disclosed ? '✓ Disclosed' : '✗ Missing'}
-              </strong>
+            <div>
+              <span className="debrief-label contested">CONTESTED POINTS</span>
+              {debrief?.contested_points?.map((point, index) => <p key={index}><PIcon name="information" /> {point}</p>)}
             </div>
           </div>
         </div>
       )}
-      <div className="debrief-columns">
-        <div><span className="debrief-label strength">SOLIDIFIED STRENGTHS</span>
-          {debrief?.solidified_strengths?.map((s, i) => <p key={i}><PIcon name="check" /> {s}</p>)}
-        </div>
-        <div><span className="debrief-label weakness">ACTIONABLE WEAKNESSES</span>
-          {debrief?.actionable_weaknesses?.map((w, i) => <button key={i}><PIcon name="error-filled" /> <span>{w}</span><PIcon name="arrow-right" /></button>)}
-        </div>
-      </div>
-    </div>}</section>
-
-    <div className="arena-bottom"><span><PIcon name="clock" /> Next round begins automatically</span><PButton variant="secondary" onClick={onReport}>View interim report</PButton></div>
-  </div>;
+    </section>
+  );
 }
 
-function AgentMessage({ turn, allTurns, role, time, tone, text, cite }: { turn?: Turn; allTurns?: Turn[]; role: string; time: string; tone: string; text: string; cite: string }) {
-  const validatorTurn = allTurns?.find(
-    (t) => t.agent_type === 'validator' && turn && t.exchange_number === turn.exchange_number
+function selectDisplayTurns(turns: Turn[]): Turn[] {
+  const exchanges = new Map<number, Turn[]>();
+  for (const turn of turns) {
+    if (turn.exchange_number < 1 || turn.exchange_number > TOTAL_EXCHANGES) continue;
+    const exchangeTurns = exchanges.get(turn.exchange_number) || [];
+    exchangeTurns.push(turn);
+    exchanges.set(turn.exchange_number, exchangeTurns);
+  }
+
+  const selected: Turn[] = [];
+  for (const exchangeTurns of exchanges.values()) {
+    const ordered = [...exchangeTurns].sort((left, right) => left.sequence - right.sequence);
+    const attacker = ordered.filter((turn) => turn.agent_type === "attacker").at(-1);
+    const defender = ordered
+      .filter(
+        (turn) =>
+          turn.agent_type === "defender" &&
+          (!attacker || turn.sequence > attacker.sequence),
+      )
+      .at(-1);
+    const referee = ordered.filter((turn) => turn.agent_type === "referee").at(-1);
+    if (attacker) selected.push(attacker);
+    if (defender) selected.push(defender);
+    if (referee) selected.push(referee);
+  }
+
+  return selected.sort(
+    (left, right) =>
+      left.exchange_number - right.exchange_number || left.sequence - right.sequence,
   );
-  const externalValidations = validatorTurn?.content?.external_validations || [];
+}
+
+function confidencePercent(confidence?: number): string {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return "—";
+  const percentage = confidence <= 1 ? confidence * 100 : confidence;
+  return `${Math.round(Math.max(0, Math.min(100, percentage)))}%`;
+}
+
+function ExchangeVerdicts({ verdicts, status }: { verdicts: Verdict[]; status: AuditStatus }) {
+  const byExchange = new Map<number, Verdict>();
+  for (const verdict of verdicts) {
+    if (verdict.exchange_number >= 1 && verdict.exchange_number <= TOTAL_EXCHANGES) {
+      byExchange.set(verdict.exchange_number, verdict);
+    }
+  }
+
+  return (
+    <section className="exchange-verdicts" aria-labelledby="exchange-verdicts-title">
+      <div className="verdicts-header">
+        <div>
+          <span className="section-kicker">THREE-EXCHANGE ADJUDICATION</span>
+          <h2 id="exchange-verdicts-title">Exchange verdicts</h2>
+        </div>
+        <span>{byExchange.size} / {TOTAL_EXCHANGES} final</span>
+      </div>
+      {status === "completed" && byExchange.size !== TOTAL_EXCHANGES && (
+        <div className="pipeline-alert error" role="alert">
+          <PIcon name="error-filled" />
+          <div><strong>Incomplete final result</strong><span>The audit completed with {byExchange.size} of {TOTAL_EXCHANGES} required verdicts.</span></div>
+        </div>
+      )}
+      <div className="verdict-grid">
+        {Array.from({ length: TOTAL_EXCHANGES }, (_, index) => {
+          const exchangeNumber = index + 1;
+          const verdict = byExchange.get(exchangeNumber);
+          const verdictClass = verdict?.verdict_type.toLowerCase().replaceAll("_", "-") || "pending";
+          return (
+            <article className={`verdict-card ${verdictClass}`} key={exchangeNumber}>
+              <div className="verdict-card-header">
+                <span>EXCHANGE {String(exchangeNumber).padStart(2, "0")}</span>
+                {verdict ? (
+                  <PTag variant={verdict.verdict_type === "SOLIDIFIED" ? "success" : verdict.verdict_type === "ACTIONABLE_FLAW" ? "error" : "warning"}>
+                    {verdict.verdict_type.replaceAll("_", " ")}
+                  </PTag>
+                ) : <PTag variant="secondary">PENDING</PTag>}
+              </div>
+              {verdict ? (
+                <>
+                  <strong>{verdict.claim_summary || "Adjudicated claim"}</strong>
+                  <p>{verdict.rationale || "No rationale was returned."}</p>
+                  <small>Confidence {confidencePercent(verdict.confidence)}</small>
+                </>
+              ) : (
+                <p>Waiting for the Attacker, Defender, validation, and Referee ruling.</p>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function canonicalTitle(title?: string): string {
+  return (title || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function AgentMessage({ turn, allTurns, role, time, tone, text, cite }: { turn: Turn; allTurns: Turn[]; role: string; time: string; tone: string; text: string; cite: string }) {
+  const validatorTurn = [...allTurns]
+    .filter(
+      (candidate) =>
+        candidate.agent_type === "validator" &&
+        candidate.exchange_number === turn.exchange_number &&
+        candidate.sequence > turn.sequence,
+    )
+    .sort((left, right) => left.sequence - right.sequence)[0];
+  const externalValidations = validatorTurn?.content.external_validations || [];
 
   return (
     <article className={`agent-message ${tone}`}>
       <div className="message-meta">
         <span className="agent-avatar">{role[0]}</span>
-        <strong>{role}</strong>
+        <strong>EXCHANGE {turn.exchange_number} · {role}</strong>
         <span>{time}</span>
         <PTag variant={tone === 'attacker' ? 'error' : tone === 'defender' ? 'success' : 'secondary'}>
           {tone === 'referee' ? 'RULING' : 'ARGUMENT'}
@@ -370,48 +916,45 @@ function AgentMessage({ turn, allTurns, role, time, tone, text, cite }: { turn?:
 
       <p>{text}</p>
 
-      {/* Indicator when external literature search was run */}
       {turn?.content?.external_search_performed && (
-        <div style={{ margin: '0.5rem 0', fontSize: '0.8rem', color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span>🌐</span>
+        <div className="literature-search-note">
+          <PIcon name="globe" />
           <span>External literature search executed across Semantic Scholar, arXiv, & OpenAlex ({turn.content.external_candidate_count ?? 0} candidates retrieved)</span>
         </div>
       )}
 
-      {/* External Literature Citations with Existence Validation Status */}
       {turn?.content?.external_citations && turn.content.external_citations.length > 0 && (
-        <div style={{ marginTop: '0.75rem', padding: '0.65rem 0.8rem', background: 'rgba(0,0,0,0.25)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#9ca3af', letterSpacing: '0.05em', textTransform: 'uppercase', display: 'block', marginBottom: '0.4rem' }}>
-            📚 Cited External Literature & Existence Validation
+        <div className="external-literature">
+          <span className="external-literature-title">
+            <PIcon name="linked" /> Cited literature
           </span>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+          <div className="external-citation-list">
             {turn.content.external_citations.map((ext, idx) => {
+              const normalizedTitle = canonicalTitle(ext.title);
               const valMatch = externalValidations.find(
-                (v) => v.title && ext.title && (v.title.toLowerCase().includes(ext.title.toLowerCase()) || ext.title.toLowerCase().includes(v.title.toLowerCase()))
+                (validation) =>
+                  validation.citation_index === idx ||
+                  (normalizedTitle.length > 0 && canonicalTitle(validation.title) === normalizedTitle),
               );
-              const isValid = valMatch ? valMatch.valid : true;
+              const validationStatus = valMatch?.valid === true
+                ? "verified"
+                : valMatch?.valid === false
+                  ? "invalid"
+                  : "pending";
               return (
-                <div key={idx} style={{ fontSize: '0.82rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.65rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <div style={{ flex: 1, minWidth: '200px' }}>
-                    <div style={{ fontWeight: 600, color: '#f3f4f6' }}>
-                      {ext.url ? <a href={ext.url} target="_blank" rel="noreferrer" style={{ color: '#93c5fd', textDecoration: 'underline' }}>{ext.title}</a> : ext.title}
+                <div key={`${ext.title}-${idx}`} className="external-citation-item">
+                  <div className="external-citation-copy">
+                    <div className="external-citation-name">
+                      {ext.url ? <a href={ext.url} target="_blank" rel="noopener noreferrer">{ext.title}<PIcon name="external" /></a> : ext.title}
                     </div>
-                    <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
+                    <div className="external-citation-meta">
                       {ext.authors?.join(', ')} {ext.year ? `(${ext.year})` : ''} {ext.source ? `• ${ext.source}` : ''}
                       {ext.similarity_score != null ? ` • Overlap Similarity: ${Math.round(ext.similarity_score * 100)}%` : ''}
                     </div>
                   </div>
-                  <div>
-                    {isValid ? (
-                      <span style={{ fontSize: '0.72rem', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 600 }}>
-                        ✓ EXISTENCE VERIFIED
-                      </span>
-                    ) : (
-                      <span style={{ fontSize: '0.72rem', background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 600 }}>
-                        ✕ UNVERIFIED CITATION
-                      </span>
-                    )}
-                  </div>
+                  <span className={`validation-badge ${validationStatus}`}>
+                    {validationStatus === "verified" ? "Verified" : validationStatus === "invalid" ? "Unverified" : "Pending"}
+                  </span>
                 </div>
               );
             })}
@@ -422,16 +965,4 @@ function AgentMessage({ turn, allTurns, role, time, tone, text, cite }: { turn?:
       {cite && <div className="citation"><PIcon name="linked" /> {cite}</div>}
     </article>
   );
-}
-
-
-function ReportView({ onBack }: { onBack: () => void }) {
-  const rounds = [
-    { number: '01', title: 'Novelty & scope', status: 'Complete', score: 82 },
-    { number: '02', title: 'Theory & rigor', status: 'Complete', score: 74 },
-    { number: '03', title: 'Experimental setup', status: 'In progress', score: 68 },
-    { number: '04', title: 'Reproducibility', status: 'Queued', score: 0 },
-    { number: '05', title: 'Limitations & impact', status: 'Queued', score: 0 },
-  ];
-  return <div className="report-page"><div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" /> AUDIT COMPLETE / EXECUTIVE REPORT</div><h1>What survived scrutiny.</h1><PText size="medium">A concise map of the paper's verified contributions and the gaps that still need work.</PText></div><div className="header-actions"><PButtonPure icon="download" aria-label="Download report" /><PButtonPure icon="copy" aria-label="Copy report" /></div></div><div className="report-overview"><div className="score-ring"><strong>76</strong><span>/ 100</span><small>OVERALL RIGOR</small></div><div className="overview-copy"><PTag variant="warning">Moderate confidence</PTag><h2>Promising work with one critical gap.</h2><p>The core contribution is supported, but baseline parity and external validation should be addressed before publication.</p><div className="score-bars"><div><span>Novelty</span><i style={{ width: '82%' }} /><b>82</b></div><div><span>Rigor</span><i style={{ width: '74%' }} /><b>74</b></div><div><span>Reproducibility</span><i style={{ width: '61%' }} /><b>61</b></div></div></div></div><div className="report-columns"><section><div className="section-kicker">Verified core strengths</div><div className="finding-card green"><PIcon name="check" /><div><strong>Consistent benchmark performance</strong><p>Improvements hold across three datasets and five random seeds.</p></div></div><div className="finding-card green"><PIcon name="check" /><div><strong>Transparent compute disclosure</strong><p>Training configuration and hardware are clearly reported.</p></div></div></section><section><div className="section-kicker">Critical actionable improvements</div><div className="finding-card red"><PIcon name="error-filled" /><div><strong>Make baseline parity explicit</strong><p>Document identical preprocessing and evaluation protocols.</p></div></div><div className="finding-card red"><PIcon name="error-filled" /><div><strong>Add external validation</strong><p>Test the method on a held-out domain to support generalization.</p></div></div></section></div><div className="report-rounds"><div className="section-kicker">Round-by-round audit trail</div>{rounds.map((round) => <button className="report-round" key={round.number}><span>{round.number}</span><strong>{round.title}</strong><PTag variant={round.status === 'Complete' ? 'success' : 'secondary'}>{round.status}</PTag><b>{round.score ? `${round.score}/100` : '—'}</b><PIcon name="arrow-right" /></button>)}</div><div className="report-footer"><PButton variant="secondary" onClick={onBack}>Return to arena</PButton><PButton icon="download">Download full report</PButton></div></div>;
 }

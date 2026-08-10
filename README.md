@@ -84,7 +84,8 @@ Verdict heavily relies on **LangGraph** to orchestrate the adversarial debate as
 
 ### 1. Database Setup
 1. Create a Supabase project at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** and execute `backend/migrations/001_initial_schema.sql` and `backend/migrations/002_add_reproducibility_signals.sql`.
+2. Go to **SQL Editor** and execute the files in `backend/migrations/` in numeric order, including `003_add_session_ownership_and_audit_errors.sql` for private paper access, durable failures, and embedding-space tracking.
+3. Configure `SUPABASE_KEY` with a backend-only service-role/secret key. Never expose it through a `NEXT_PUBLIC_*` variable.
 
 ### 2. Backend (FastAPI)
 ```bash

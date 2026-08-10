@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from app.config import OPENALEX_MAILTO
-from app.services.embedding_service import embed_text, cosine_similarity
+from app.services.embedding_service import embed_batch, cosine_similarity
 import certifi
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def search_arxiv(query: str, limit: int = 5) -> list[dict]:
     """Search arXiv API."""
     try:
         encoded_query = urllib.parse.quote(query)
-        url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_query}&max_results={limit}"
+        url = f"https://export.arxiv.org/api/query?search_query=all:{encoded_query}&max_results={limit}"
         req = urllib.request.Request(url, headers={"User-Agent": "VerdictAuditSystem/1.0"})
         with urllib.request.urlopen(req, timeout=5.0, context=ssl_ctx) as resp:
             xml_data = resp.read().decode("utf-8")
@@ -218,25 +218,21 @@ def rank_candidates_by_novelty_overlap(
     if not paper_abstract or not candidates:
         return candidates[:top_k]
 
+    # One batch call avoids a sequential network round-trip for every candidate.
+    candidate_texts = [
+        (candidate.get("abstract", "") or candidate.get("title", "") or "Untitled paper")[:1000]
+        for candidate in candidates
+    ]
     try:
-        paper_vec = embed_text(paper_abstract[:1000])
+        vectors = embed_batch([paper_abstract[:1000], *candidate_texts])
     except Exception as exc:
-        logger.warning("Failed to embed paper abstract for novelty ranking: %s", exc)
+        logger.warning("Failed to embed novelty candidates as a batch: %s", exc)
         return candidates[:top_k]
 
+    paper_vec = vectors[0]
     ranked = []
-    for cand in candidates:
-        cand_abstract = cand.get("abstract", "") or cand.get("title", "")
-        if not cand_abstract:
-            sim = 0.0
-        else:
-            try:
-                cand_vec = embed_text(cand_abstract[:1000])
-                sim = cosine_similarity(paper_vec, cand_vec)
-            except Exception as exc:
-                logger.warning("Failed to embed candidate '%s': %s", cand.get("title"), exc)
-                sim = 0.0
-
+    for cand, cand_vec in zip(candidates, vectors[1:]):
+        sim = cosine_similarity(paper_vec, cand_vec)
         cand_copy = dict(cand)
         cand_copy["similarity_score"] = round(sim, 4)
         ranked.append(cand_copy)
