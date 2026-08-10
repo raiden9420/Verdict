@@ -426,13 +426,10 @@ def validator_node(state: AuditState) -> dict:
 
     external_val = []
     if state["round_topic"] in ("novelty_scope", "experimental_setup"):
-        ext_cites = state["attacker_output"].get("external_citations", [])
         external_val = validate_external_citations(
-            ext_cites,
+            state["attacker_output"].get("external_citations", []),
             state.get("external_search_results", []),
         )
-        for cite, val in zip(ext_cites, external_val):
-            cite["validated"] = val.get("valid", False)
 
     # Check if ALL attacker citations (chunk + external) are valid.
     chunk_valid = all(v["valid"] for v in attacker_val) if attacker_val else True
@@ -516,8 +513,6 @@ def referee_node(state: AuditState) -> dict:
     # Format validation results for the Referee's context
     atk_val_text = json.dumps(state["attacker_validation"], indent=2) or "[]"
     def_val_text = json.dumps(state["defender_validation"], indent=2) or "[]"
-    atk_ext_text = json.dumps(attacker.get("external_citations", []), indent=2) or "[]"
-    ext_val_text = json.dumps(state.get("external_validation", []), indent=2) or "[]"
 
     user_prompt = (
         f"## Round Topic: {state['round_topic_name']}\n\n"
@@ -525,21 +520,19 @@ def referee_node(state: AuditState) -> dict:
         f"**Summary:** {attacker.get('claim_summary', '')}\n"
         f"**Full text:** {attacker.get('critique_text', '')}\n"
         f"**Type:** {attacker.get('critique_type', '')}\n"
-        f"**In-document Citations:** {attacker.get('cited_chunk_ids', [])}\n"
-        f"**External Literature Citations:** {atk_ext_text}\n\n"
+        f"**Citations:** {attacker.get('cited_chunk_ids', [])}\n\n"
         f"## Defender's Rebuttal\n"
         f"**Text:** {defender.get('rebuttal_text', '')}\n"
         f"**Citations:** {defender.get('cited_chunk_ids', [])}\n"
         f"**Concedes:** {defender.get('concedes', False)}\n\n"
         f"## Grounding Validation Results (Authoritative)\n"
-        f"**Attacker chunk citations:** {atk_val_text}\n"
-        f"**Attacker external literature validation:** {ext_val_text}\n"
+        f"**Attacker citations:** {atk_val_text}\n"
         f"**Defender citations:** {def_val_text}\n\n"
         f"Now adjudicate this exchange."
     )
 
     system = referee_system_prompt()
-    output, provider_client, provider_name = llm.generate_with_meta(system, user_prompt)
+    output = llm.generate(system, user_prompt)
 
     output.setdefault("verdict", "CONTESTED")
     output.setdefault("confidence", 0.5)
@@ -553,17 +546,14 @@ def referee_node(state: AuditState) -> dict:
     confidence = float(output.get("confidence", 0.5))
 
     # Self-consistency check — if confidence < threshold, re-run Referee adjudication once
-    # Skip self-consistency re-run if exchange already required an attacker retry to cap call budget
-    has_retried_attacker = state.get("attacker_retries", 0) > 0
-    if confidence < SELF_CONSISTENCY_THRESHOLD and not has_retried_attacker:
+    if confidence < SELF_CONSISTENCY_THRESHOLD:
         logger.info(
-            "Referee confidence %.2f < threshold %.2f — performing self-consistency re-run via pinned provider '%s'",
+            "Referee confidence %.2f < threshold %.2f — performing self-consistency re-run",
             confidence,
             SELF_CONSISTENCY_THRESHOLD,
-            provider_name,
         )
         try:
-            output_rerun, _, _ = llm.generate_with_meta(system, user_prompt, pinned_client=provider_client)
+            output_rerun = llm.generate(system, user_prompt)
             v2 = output_rerun.get("verdict", "").upper().replace(" ", "_")
             if v2 not in ("SOLIDIFIED", "ACTIONABLE_FLAW", "CONTESTED"):
                 v2 = "CONTESTED"
@@ -584,13 +574,7 @@ def referee_node(state: AuditState) -> dict:
             else:
                 logger.info("Self-consistency re-run agreed on '%s'", verdict_type)
         except Exception as exc:
-            logger.warning("Self-consistency re-run failed on pinned provider '%s': %s", provider_name, exc)
-    elif confidence < SELF_CONSISTENCY_THRESHOLD and has_retried_attacker:
-        logger.info(
-            "Skipping self-consistency re-run because exchange required attacker retry (confidence %.2f)",
-            confidence,
-        )
-
+            logger.warning("Self-consistency re-run failed: %s", exc)
 
 
     seq = state["sequence_counter"]

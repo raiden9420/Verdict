@@ -23,14 +23,28 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
   };
 }
 
+// Custom error class for paper upload failures (e.g. relevance check failure)
+export class UploadError extends Error {
+  relevanceFailed: boolean;
+  reason?: string;
+
+  constructor(message: string, relevanceFailed: boolean = false, reason?: string) {
+    super(message);
+    this.name = "UploadError";
+    this.relevanceFailed = relevanceFailed;
+    this.reason = reason;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Paper upload
 // ---------------------------------------------------------------------------
-export async function uploadPaper(file: File): Promise<PaperUploadResponse> {
+export async function uploadPaper(file: File, force: boolean = false): Promise<PaperUploadResponse> {
   const form = new FormData();
   form.append("file", file);
 
-  const res = await fetch(`${API_BASE}/papers`, {
+  const url = force ? `${API_BASE}/papers?force=true` : `${API_BASE}/papers`;
+  const res = await fetch(url, {
     method: "POST",
     headers: headers(), // don't set Content-Type — browser sets it for FormData
     body: form,
@@ -38,7 +52,16 @@ export async function uploadPaper(file: File): Promise<PaperUploadResponse> {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Upload failed");
+    const detail = err.detail;
+    if (typeof detail === "object" && detail !== null) {
+      throw new UploadError(
+        detail.message || "Upload failed",
+        Boolean(detail.relevance_failed),
+        detail.reason
+      );
+    }
+    const msg = typeof detail === "string" ? detail : "Upload failed";
+    throw new UploadError(msg, false);
   }
 
   return res.json();

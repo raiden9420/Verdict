@@ -9,7 +9,7 @@ import uuid
 import json
 import logging
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
 from fastapi.responses import RedirectResponse
 
 from app.api.dependencies import get_session_id
@@ -19,9 +19,11 @@ from app.services.pdf_service import (
     validate_and_parse_pdf,
     chunk_pages,
     PDFValidationError,
+    DocumentRelevanceError,
 )
 from app.services.embedding_service import embed_batch
 from app.services.reproducibility_service import scan_paper_reproducibility
+from app.services.relevance_service import classify_document_relevance
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["papers"])
@@ -35,6 +37,7 @@ router = APIRouter(tags=["papers"])
 )
 async def upload_paper(
     file: UploadFile = File(...),
+    force: bool = Query(False),
     session_id: str = Depends(get_session_id),
 ):
     """
@@ -44,6 +47,7 @@ async def upload_paper(
     - Files > 20 MB
     - PDFs > 40 pages
     - Scanned / image-only PDFs (empty or near-empty extracted text)
+    - Non-research documents (unless force=True)
     """
     paper_id = str(uuid.uuid4())
     file_bytes = await file.read()
@@ -53,6 +57,22 @@ async def upload_paper(
         parsed = validate_and_parse_pdf(file_bytes, file.filename or "upload.pdf", paper_id)
     except PDFValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # ---- Document Relevance Gate ----
+    if not force:
+        sample_text = "\n\n".join(text for _, text in parsed["pages"][:3])[:6000]
+        relevance = classify_document_relevance(sample_text)
+        if not relevance.get("is_research_paper", True):
+            reason = relevance.get("reason", "The document does not appear to be an academic manuscript.")
+            logger.warning("Document relevance check failed for '%s': %s", file.filename, reason)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"This document doesn't appear to be a research paper — {reason}. Verdict audits academic manuscripts.",
+                    "reason": reason,
+                    "relevance_failed": True,
+                },
+            )
 
     # ---- Chunk ----
     chunks = chunk_pages(parsed["pages"])

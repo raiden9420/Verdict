@@ -26,6 +26,13 @@ class PDFValidationError(Exception):
     pass
 
 
+class DocumentRelevanceError(Exception):
+    """Raised when an uploaded document fails the academic relevance check."""
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Document relevance check failed: {reason}")
+
+
 # ---------------------------------------------------------------------------
 # Validation + parsing
 # ---------------------------------------------------------------------------

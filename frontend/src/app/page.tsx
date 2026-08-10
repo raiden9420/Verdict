@@ -386,15 +386,10 @@ function AgentMessage({ turn, allTurns, role, time, tone, text, cite }: { turn?:
           </span>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
             {turn.content.external_citations.map((ext, idx) => {
-              const normalize = (t?: string) => (t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-              const normExt = normalize(ext.title);
-              const valMatch = externalValidations.find((v) => {
-                const normV = normalize(v.title);
-                return normV && normExt && (normV.includes(normExt) || normExt.includes(normV));
-              });
-              const isValid = ext.validated !== undefined
-                ? ext.validated
-                : (valMatch ? valMatch.valid : false);
+              const valMatch = externalValidations.find(
+                (v) => v.title && ext.title && (v.title.toLowerCase().includes(ext.title.toLowerCase()) || ext.title.toLowerCase().includes(v.title.toLowerCase()))
+              );
+              const isValid = valMatch ? valMatch.valid : true;
               return (
                 <div key={idx} style={{ fontSize: '0.82rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.65rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <div style={{ flex: 1, minWidth: '200px' }}>
