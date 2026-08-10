@@ -18,13 +18,12 @@ from typing import Any
 
 from app.config import OPENALEX_MAILTO
 from app.services.embedding_service import embed_text, cosine_similarity
+import certifi
 
 logger = logging.getLogger(__name__)
 
-# Create permissive SSL context to prevent macOS cert verification errors
-ssl_ctx = ssl.create_default_context()
-ssl_ctx.check_hostname = False
-ssl_ctx.verify_mode = ssl.CERT_NONE
+# Verified SSL context using certifi CA bundle
+ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 
 # In-process cache: query -> list of paper dicts

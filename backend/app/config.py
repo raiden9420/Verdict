@@ -4,9 +4,15 @@ Never import secrets directly; always go through this module.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Ensure .env inside backend/ is located regardless of CWD
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
 
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 SUPABASE_URL: str = os.environ.get("SUPABASE_URL", "")

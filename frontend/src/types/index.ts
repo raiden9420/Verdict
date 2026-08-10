@@ -69,6 +69,7 @@ export interface ExternalCitation {
   url?: string;
   source?: string;
   similarity_score?: number;
+  validated?: boolean;
 }
 
 export interface ExternalValidationResult {

@@ -14,6 +14,7 @@ import urllib.error
 from abc import ABC, abstractmethod
 from typing import Any
 
+import certifi
 import google.genai as genai
 from google.genai import types
 
@@ -22,10 +23,8 @@ from app.constants import GEMINI_MODEL, LLM_MAX_RETRIES, LLM_BASE_DELAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
-# Permissive SSL context for urllib calls on macOS
-ssl_ctx = ssl.create_default_context()
-ssl_ctx.check_hostname = False
-ssl_ctx.verify_mode = ssl.CERT_NONE
+# Verified SSL context using certifi CA bundle
+ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 
 
@@ -88,11 +87,13 @@ class GeminiClient(LLMClient):
                     raw = raw.rsplit("```", 1)[0]  # drop closing fence
 
                 try:
-                    return json.loads(raw)
+                    parsed = json.loads(raw)
+                    logger.info("Gemini LLM generation succeeded using model '%s'", self.model_name)
+                    return parsed
                 except json.JSONDecodeError:
                     repaired = _repair_json(raw)
                     if repaired is not None:
-                        logger.info("JSON repair succeeded for Gemini on attempt %d", json_failures + 1)
+                        logger.info("Gemini LLM generation succeeded (JSON repaired) using model '%s' on attempt %d", self.model_name, json_failures + 1)
                         return repaired
                     json_failures += 1
                     last_exc = json.JSONDecodeError("malformed", raw[:100], 0)
@@ -287,7 +288,22 @@ class MultiProviderLLMClient(LLMClient):
         if not self.providers:
             logger.error("No LLM providers configured!")
 
-    def generate(self, system_prompt: str, user_prompt: str) -> dict:
+    def generate_with_meta(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        pinned_client: LLMClient | None = None,
+    ) -> tuple[dict, LLMClient, str]:
+        """
+        Generate content and return (result_dict, serving_client_instance, provider_name).
+        If pinned_client is passed, only that client instance is used.
+        """
+        if pinned_client is not None:
+            name = getattr(pinned_client, "model_name", "PinnedProvider")
+            logger.info("Executing pinned LLM generation via client '%s'", name)
+            res = pinned_client.generate(system_prompt, user_prompt)
+            return res, pinned_client, str(name)
+
         if not self.providers:
             raise RuntimeError("No LLM provider is available or configured.")
 
@@ -295,12 +311,17 @@ class MultiProviderLLMClient(LLMClient):
         for name, client in self.providers:
             try:
                 logger.info("Attempting LLM generation via provider '%s'", name)
-                return client.generate(system_prompt, user_prompt)
+                res = client.generate(system_prompt, user_prompt)
+                return res, client, name
             except Exception as exc:
                 last_error = exc
                 logger.warning("Provider '%s' failed: %s. Trying next provider...", name, exc)
 
         raise RuntimeError(f"All configured LLM providers failed. Last error: {last_error}")
+
+    def generate(self, system_prompt: str, user_prompt: str) -> dict:
+        res, _, _ = self.generate_with_meta(system_prompt, user_prompt)
+        return res
 
 
 def _repair_json(raw: str) -> dict | None:

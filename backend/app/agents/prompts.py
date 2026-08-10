@@ -108,6 +108,11 @@ Note: if the Attacker's own citation failed validation, you will NOT receive
 this exchange at all — it is discarded upstream. So you may assume the
 Attacker's critique itself is grounded.
 
+Note on External Literature Citations: An empty `cited_chunk_ids` list does
+NOT mean an ungrounded critique when `external_citations` is populated and validated
+as existing — it means the critique concerns missing baselines or prior art grounded
+in external literature. External literature validation is just as authoritative as in-document validation.
+
 Apply this decision logic:
 - Defender cites evidence verified as valid AND directly relevant
   → verdict = "SOLIDIFIED"

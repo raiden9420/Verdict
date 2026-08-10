@@ -82,7 +82,12 @@ async def upload_paper(
         supabase.table("papers").insert(paper_data).execute()
     except Exception as exc:
         if "reproducibility_signals" in str(exc):
-            logger.warning("Supabase table missing reproducibility_signals column, retrying insert without it: %s", exc)
+            logger.error(
+                "CRITICAL SCHEMA MISMATCH: 'papers' table in Supabase is missing 'reproducibility_signals' column! "
+                "Migration 002 MUST be executed in the Supabase SQL editor (ALTER TABLE papers ADD COLUMN IF NOT EXISTS reproducibility_signals JSONB;). "
+                "Retrying insert without reproducibility_signals: %s",
+                exc,
+            )
             paper_data.pop("reproducibility_signals", None)
             supabase.table("papers").insert(paper_data).execute()
         else:
