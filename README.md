@@ -121,6 +121,11 @@ npm run dev
 
 Visit [http://localhost:3000](http://localhost:3000) to enter the Arena.
 
+Hosted production builds are pinned to the deployed Render API at
+`https://verdict-backend-dw29.onrender.com`; they never use the local development
+URL. `NEXT_PUBLIC_API_URL` is only honored by the development build, so a Vercel
+environment-variable omission cannot route a visitor's browser to localhost.
+
 ---
 
 ## 🏗️ Project Structure

@@ -11,7 +11,21 @@ import type {
   DebriefCard,
 } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const LOCAL_API_BASE = "http://localhost:8000";
+const PRODUCTION_API_BASE = "https://verdict-backend-dw29.onrender.com";
+
+function resolveApiBase(): string {
+  if (process.env.NODE_ENV === "production") {
+    return PRODUCTION_API_BASE;
+  }
+
+  return (process.env.NEXT_PUBLIC_API_URL?.trim() || LOCAL_API_BASE).replace(
+    /\/+$/,
+    "",
+  );
+}
+
+const API_BASE = resolveApiBase();
 
 interface ErrorPayload {
   detail?: unknown;
