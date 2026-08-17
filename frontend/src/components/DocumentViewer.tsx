@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PIcon } from "@porsche-design-system/components-react";
-import { pdfUrl, verifyPdfAccess } from "@/lib/api";
+import { fetchPdfUrl } from "@/lib/api";
 
 interface DocumentViewerProps {
   paperId: string;
@@ -13,27 +13,30 @@ export default function DocumentViewer({
   paperId,
   highlightedPages,
 }: DocumentViewerProps) {
-  const url = pdfUrl(paperId);
   const [selectedPage, setSelectedPage] = useState<number | null>(null);
+  const [signedUrl, setSignedUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
-  const [accessReady, setAccessReady] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [probeAttempt, setProbeAttempt] = useState(0);
-  const embedUrl = selectedPage ? `${url}#page=${selectedPage}` : `${url}#view=FitH`;
+  const embedUrl = signedUrl
+    ? selectedPage
+      ? `${signedUrl}#page=${selectedPage}`
+      : `${signedUrl}#view=FitH`
+    : null;
 
   useEffect(() => {
     let active = true;
-    void verifyPdfAccess(paperId)
-      .then(() => {
+    void fetchPdfUrl(paperId)
+      .then(({ url }) => {
         if (!active) return;
-        setAccessReady(true);
+        setSignedUrl(url);
         setAccessError(null);
         setLoading(true);
       })
       .catch((error: unknown) => {
         if (!active) return;
-        setAccessReady(false);
+        setSignedUrl(null);
         setLoading(false);
         setAccessError(error instanceof Error ? error.message : "The PDF preview is unavailable.");
       });
@@ -52,9 +55,11 @@ export default function DocumentViewer({
     <div className="document-viewer">
       <div className="viewer-header">
         <div className="viewer-title"><PIcon name="document" /><strong>Source paper</strong></div>
-        <a className="viewer-open" href={url} target="_blank" rel="noopener noreferrer">
-          Open PDF <PIcon name="external" />
-        </a>
+        {signedUrl ? (
+          <a className="viewer-open" href={signedUrl} target="_blank" rel="noopener noreferrer">
+            Open PDF <PIcon name="external" />
+          </a>
+        ) : <span className="viewer-open unavailable" aria-hidden="true">Open PDF</span>}
       </div>
 
       {highlightedPages.length > 0 && (
@@ -86,7 +91,7 @@ export default function DocumentViewer({
               className="viewer-retry"
               onClick={() => {
                 setFailed(false);
-                setAccessReady(false);
+                setSignedUrl(null);
                 setAccessError(null);
                 setLoading(true);
                 setProbeAttempt((attempt) => attempt + 1);
@@ -96,7 +101,7 @@ export default function DocumentViewer({
             </button>
           </div>
         )}
-        {accessReady && !accessError && (
+        {embedUrl && !accessError && (
           <iframe
             key={embedUrl}
             src={embedUrl}

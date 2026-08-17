@@ -10,15 +10,22 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import validate_config
+from app.config import FRONTEND_ORIGINS, validate_config
 from app.api.papers import router as papers_router
 from app.api.audits import (
     recover_orphaned_audits,
     router as audits_router,
     set_event_loop,
     shutdown_audit_executor,
+)
+from app.services.readiness_service import (
+    APP_VERSION,
+    PRODUCT_PHASE,
+    ReadinessError,
+    verify_phase3_readiness,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,15 +64,18 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Verdict — Adversarial Research Audit API",
-    version="0.1.0",
-    description="Phase 1: 3-agent debate, grounding validation, debrief cards.",
+    version=APP_VERSION,
+    description=(
+        "Authenticated, multi-topic adversarial research audits with grounded "
+        "round debriefs, final reports, exports, and revision comparisons."
+    ),
     lifespan=lifespan,
 )
 
-# CORS — allow the Next.js dev server and any deployed frontend
+# CORS — configured explicitly now that authenticated accounts are enabled.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Phase 1: permissive; Phase 3 will lock down
+    allow_origins=list(FRONTEND_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,4 +88,25 @@ app.include_router(audits_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Cheap liveness probe; it deliberately does not contact providers."""
+    return {"status": "ok", "version": APP_VERSION, "phase": PRODUCT_PHASE}
+
+
+@app.get("/ready")
+async def ready():
+    """Deployment gate for the Phase 3 schema and private paper storage."""
+    try:
+        await asyncio.to_thread(verify_phase3_readiness)
+    except ReadinessError as exc:
+        logger.error("Phase 3 readiness failed (%s): %s", exc.component, exc)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "version": APP_VERSION,
+                "phase": PRODUCT_PHASE,
+                "component": exc.component,
+                "detail": str(exc),
+            },
+        )
+    return {"status": "ready", "version": APP_VERSION, "phase": PRODUCT_PHASE}

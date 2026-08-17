@@ -1,28 +1,34 @@
 /**
- * API client for the Verdict backend.
- * Attaches the X-Session-Id header to every request.
+ * Authenticated API client for the Verdict backend.
+ *
+ * Every protected request carries the current Supabase access token. A single
+ * refresh-and-retry is allowed for a 401 so requests racing token rotation do
+ * not surface as false audit failures.
  */
 
-import { getSessionId } from "./session";
+import { getSupabaseBrowserClient } from "./supabase";
 import type {
-  PaperUploadResponse,
+  AuditCreateRequest,
   AuditCreateResponse,
-  TurnsListResponse,
+  AuditSummary,
   DebriefCard,
+  FinalReport,
+  PaperSummary,
+  PaperUploadResponse,
+  PdfUrlResponse,
+  TurnsListResponse,
+  VersionDiff,
 } from "@/types";
 
 const LOCAL_API_BASE = "http://localhost:8000";
 const PRODUCTION_API_BASE = "https://verdict-backend-dw29.onrender.com";
 
 function resolveApiBase(): string {
-  if (process.env.NODE_ENV === "production") {
-    return PRODUCTION_API_BASE;
-  }
-
-  return (process.env.NEXT_PUBLIC_API_URL?.trim() || LOCAL_API_BASE).replace(
-    /\/+$/,
-    "",
-  );
+  const configuredBase = process.env.NEXT_PUBLIC_API_URL?.trim();
+  const fallback = process.env.NODE_ENV === "production"
+    ? PRODUCTION_API_BASE
+    : LOCAL_API_BASE;
+  return (configuredBase || fallback).replace(/\/+$/, "");
 }
 
 const API_BASE = resolveApiBase();
@@ -32,26 +38,24 @@ interface ErrorPayload {
   message?: unknown;
 }
 
-/**
- * Build headers with the session ID.
- */
-function headers(extra: Record<string, string> = {}): Record<string, string> {
-  return {
-    "X-Session-Id": getSessionId(),
-    ...extra,
-  };
-}
+let refreshPromise: Promise<string | null> | null = null;
 
-// Custom error class for paper upload failures (e.g. relevance check failure)
 export class UploadError extends Error {
   relevanceFailed: boolean;
   reason?: string;
+  status?: number;
 
-  constructor(message: string, relevanceFailed: boolean = false, reason?: string) {
+  constructor(
+    message: string,
+    relevanceFailed: boolean = false,
+    reason?: string,
+    status?: number,
+  ) {
     super(message);
     this.name = "UploadError";
     this.relevanceFailed = relevanceFailed;
     this.reason = reason;
+    this.status = status;
   }
 }
 
@@ -81,144 +85,272 @@ async function readErrorPayload(response: Response): Promise<ErrorPayload> {
   return response.json().catch(() => ({ detail: response.statusText }));
 }
 
-function withSessionQuery(url: string): string {
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}session_id=${encodeURIComponent(getSessionId())}`;
+async function currentAccessToken(): Promise<string | null> {
+  const { data, error } = await getSupabaseBrowserClient().auth.getSession();
+  if (error) throw new ApiError(error.message, 401);
+  return data.session?.access_token ?? null;
+}
+
+async function refreshedAccessToken(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = getSupabaseBrowserClient().auth
+      .refreshSession()
+      .then(({ data, error }) => {
+        if (error) return null;
+        return data.session?.access_token ?? null;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
+async function endInvalidLocalSession(): Promise<void> {
+  try {
+    await getSupabaseBrowserClient().auth.signOut({ scope: "local" });
+  } catch {
+    // The request still fails closed below. Supabase will reconcile its local
+    // session on the next auth event or page load if sign-out is unavailable.
+  }
+}
+
+function requestWithToken(
+  input: string,
+  init: RequestInit,
+  accessToken: string,
+): Promise<Response> {
+  const requestHeaders = new Headers(init.headers);
+  requestHeaders.set("Authorization", `Bearer ${accessToken}`);
+  return fetch(input, { ...init, headers: requestHeaders });
+}
+
+async function authenticatedFetch(
+  input: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const accessToken = await currentAccessToken();
+  if (!accessToken) {
+    throw new ApiError("Sign in to continue.", 401);
+  }
+
+  let response = await requestWithToken(input, init, accessToken);
+  if (response.status !== 401) return response;
+
+  const refreshedToken = await refreshedAccessToken();
+  if (refreshedToken) {
+    response = await requestWithToken(input, init, refreshedToken);
+    if (response.status !== 401) return response;
+  }
+
+  await endInvalidLocalSession();
+  return response;
+}
+
+async function responseError(response: Response, fallback: string): Promise<ApiError> {
+  const payload = await readErrorPayload(response);
+  return new ApiError(
+    errorMessage(payload.detail ?? payload.message, fallback),
+    response.status,
+  );
+}
+
+async function getJson<T>(path: string, fallback: string): Promise<T> {
+  const response = await authenticatedFetch(`${API_BASE}${path}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw await responseError(response, fallback);
+  return response.json() as Promise<T>;
 }
 
 // ---------------------------------------------------------------------------
-// Paper upload
+// Papers
 // ---------------------------------------------------------------------------
-export async function uploadPaper(file: File, force: boolean = false): Promise<PaperUploadResponse> {
+export async function uploadPaper(
+  file: File,
+  force: boolean = false,
+  parentPaperId?: string | null,
+): Promise<PaperUploadResponse> {
   const form = new FormData();
   form.append("file", file);
 
-  const url = force ? `${API_BASE}/papers?force=true` : `${API_BASE}/papers`;
-  const res = await fetch(url, {
+  const query = new URLSearchParams();
+  if (force) query.set("force", "true");
+  if (parentPaperId) query.set("parent_paper_id", parentPaperId);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await authenticatedFetch(`${API_BASE}/papers${suffix}`, {
     method: "POST",
-    headers: headers(), // don't set Content-Type — browser sets it for FormData
     body: form,
   });
 
-  if (!res.ok) {
-    const err = await readErrorPayload(res);
-    const detail = err.detail;
+  if (!response.ok) {
+    const payload = await readErrorPayload(response);
+    const detail = payload.detail;
     if (typeof detail === "object" && detail !== null) {
       const relevanceFailed = objectValue(detail, "relevance_failed") === true;
       const reason = objectValue(detail, "reason");
       throw new UploadError(
-        errorMessage(detail, `Upload failed (${res.status})`),
+        errorMessage(detail, `Upload failed (${response.status})`),
         relevanceFailed,
         typeof reason === "string" ? reason : undefined,
+        response.status,
       );
     }
-    throw new UploadError(errorMessage(detail, `Upload failed (${res.status})`));
+    throw new UploadError(
+      errorMessage(detail, `Upload failed (${response.status})`),
+      false,
+      undefined,
+      response.status,
+    );
   }
 
-  return res.json();
+  return response.json() as Promise<PaperUploadResponse>;
+}
+
+export async function fetchPapers(): Promise<PaperSummary[]> {
+  return getJson<PaperSummary[]>("/papers", "Failed to load papers");
+}
+
+export async function fetchPdfUrl(paperId: string): Promise<PdfUrlResponse> {
+  const result = await getJson<PdfUrlResponse>(
+    `/papers/${encodeURIComponent(paperId)}/pdf-url`,
+    "PDF preview is unavailable",
+  );
+  let parsed: URL;
+  try {
+    parsed = new URL(result.url);
+  } catch {
+    throw new ApiError("The PDF service returned an invalid URL.", 502);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new ApiError("The PDF service returned an unsafe URL.", 502);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
-// Start audit
+// Audits
 // ---------------------------------------------------------------------------
+type AuditOptions = Omit<AuditCreateRequest, "paper_id">;
+
 export async function startAudit(
   paperId: string,
-  roundTopic: string,
+  roundTopicOrOptions: string | AuditOptions,
 ): Promise<AuditCreateResponse> {
-  const res = await fetch(`${API_BASE}/audits`, {
+  const body: AuditCreateRequest = typeof roundTopicOrOptions === "string"
+    ? { paper_id: paperId, round_topic: roundTopicOrOptions }
+    : { paper_id: paperId, ...roundTopicOrOptions };
+  const response = await authenticatedFetch(`${API_BASE}/audits`, {
     method: "POST",
-    headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ paper_id: paperId, round_topic: roundTopic }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
-  if (!res.ok) {
-    const err = await readErrorPayload(res);
-    throw new ApiError(
-      errorMessage(err.detail ?? err.message, `Failed to start audit (${res.status})`),
-      res.status,
-    );
+  if (!response.ok) {
+    throw await responseError(response, `Failed to start audit (${response.status})`);
   }
-
-  return res.json();
+  return response.json() as Promise<AuditCreateResponse>;
 }
 
-// ---------------------------------------------------------------------------
-// SSE stream URL (consumed by useSSE hook directly)
-// ---------------------------------------------------------------------------
-export function streamUrl(auditId: string): string {
-  return withSessionQuery(`${API_BASE}/audits/${auditId}/stream`);
+export async function openAuditStream(
+  auditId: string,
+  lastEventId: string,
+  signal: AbortSignal,
+): Promise<Response> {
+  const headers = new Headers({ Accept: "text/event-stream" });
+  if (lastEventId) headers.set("Last-Event-ID", lastEventId);
+  const response = await authenticatedFetch(
+    `${API_BASE}/audits/${encodeURIComponent(auditId)}/stream`,
+    { headers, cache: "no-store", signal },
+  );
+  if (!response.ok) {
+    throw await responseError(response, `Live audit stream is unavailable (${response.status})`);
+  }
+  if (!response.body) {
+    throw new ApiError("The live audit stream returned no response body.", 502);
+  }
+  return response;
 }
 
-// ---------------------------------------------------------------------------
-// Polling fallback
-// ---------------------------------------------------------------------------
 export async function fetchTurns(auditId: string): Promise<TurnsListResponse> {
-  const res = await fetch(`${API_BASE}/audits/${auditId}/turns`, {
-    headers: headers(),
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    const err = await readErrorPayload(res);
-    throw new ApiError(
-      errorMessage(err.detail ?? err.message, `Failed to fetch audit state (${res.status})`),
-      res.status,
-    );
-  }
-
-  return res.json();
+  return getJson<TurnsListResponse>(
+    `/audits/${encodeURIComponent(auditId)}/turns`,
+    "Failed to fetch audit state",
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Debrief card
-// ---------------------------------------------------------------------------
+export async function fetchAudits(): Promise<AuditSummary[]> {
+  return getJson<AuditSummary[]>("/audits", "Failed to load audits");
+}
+
 export async function fetchDebrief(auditId: string): Promise<DebriefCard> {
-  const res = await fetch(`${API_BASE}/audits/${auditId}/debrief`, {
-    headers: headers(),
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    if (res.status === 404) {
-      throw new ApiError("Debrief not ready yet", res.status);
+  const response = await authenticatedFetch(
+    `${API_BASE}/audits/${encodeURIComponent(auditId)}/debrief`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new ApiError("Debrief not ready yet", response.status);
     }
-    const err = await readErrorPayload(res);
-    throw new ApiError(
-      errorMessage(err.detail ?? err.message, `Failed to fetch debrief (${res.status})`),
-      res.status,
-    );
+    throw await responseError(response, `Failed to fetch debrief (${response.status})`);
   }
-
-  return res.json();
+  return response.json() as Promise<DebriefCard>;
 }
 
-// ---------------------------------------------------------------------------
-// PDF URL (for the Document Viewer)
-// ---------------------------------------------------------------------------
-export function pdfUrl(paperId: string): string {
-  return withSessionQuery(`${API_BASE}/papers/${paperId}/pdf`);
+export async function fetchDebriefs(auditId: string): Promise<DebriefCard[]> {
+  return getJson<DebriefCard[]>(
+    `/audits/${encodeURIComponent(auditId)}/debriefs`,
+    "Failed to fetch audit debriefs",
+  );
 }
 
-/**
- * Verify PDF authorization without following the signed-storage redirect or
- * downloading the paper. Cross-origin manual redirects are intentionally
- * exposed as `opaqueredirect`; that still means the backend authorized access.
- */
-export async function verifyPdfAccess(paperId: string): Promise<void> {
-  const res = await fetch(pdfUrl(paperId), {
-    method: "GET",
-    redirect: "manual",
-    cache: "no-store",
-  });
+export async function fetchFinalReport(auditId: string): Promise<FinalReport> {
+  return getJson<FinalReport>(
+    `/audits/${encodeURIComponent(auditId)}/final-report`,
+    "Failed to fetch final report",
+  );
+}
 
-  if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
-    return;
-  }
-  if (!res.ok) {
-    const err = await readErrorPayload(res);
-    throw new ApiError(
-      errorMessage(err.detail ?? err.message, `PDF preview is unavailable (${res.status})`),
-      res.status,
+export async function fetchVersionDiffs(
+  auditId: string,
+  compareToAuditId?: string | null,
+): Promise<VersionDiff[]> {
+  const query = compareToAuditId
+    ? `?compare_to=${encodeURIComponent(compareToAuditId)}`
+    : "";
+  return getJson<VersionDiff[]>(
+    `/audits/${encodeURIComponent(auditId)}/version-diffs${query}`,
+    "Failed to fetch version comparison",
+  );
+}
+
+export async function retryVersionDiffs(
+  auditId: string,
+  compareToAuditId?: string | null,
+): Promise<VersionDiff[]> {
+  const query = compareToAuditId
+    ? `?compare_to=${encodeURIComponent(compareToAuditId)}`
+    : "";
+  const response = await authenticatedFetch(
+    `${API_BASE}/audits/${encodeURIComponent(auditId)}/version-diffs${query}`,
+    { method: "POST", cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await responseError(
+      response,
+      `Failed to retry version comparison (${response.status})`,
     );
   }
+  return response.json() as Promise<VersionDiff[]>;
+}
+
+export async function fetchFinalReportMarkdown(auditId: string): Promise<Blob> {
+  const response = await authenticatedFetch(
+    `${API_BASE}/audits/${encodeURIComponent(auditId)}/final-report/markdown`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await responseError(response, `Failed to export final report (${response.status})`);
+  }
+  return response.blob();
 }

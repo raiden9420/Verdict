@@ -45,6 +45,93 @@ EXCHANGES_PER_ROUND = 3       # fixed for Phase 1 (Fast depth)
 MAX_ATTACKER_RETRIES = 2      # retries if attacker's own citations fail
 
 # ---------------------------------------------------------------------------
+# Product configuration (Phase 3)
+# ---------------------------------------------------------------------------
+# Depth deliberately controls topic breadth, never the number of exchanges in
+# an individual round.  Keeping these constraints central lets both the API and
+# UI expose the same predictable quota/cost envelope.
+DEPTH_TOPIC_LIMITS = {
+    "fast": (1, 2),
+    "deep": (3, 4),
+    "exhaustive": (5, 6),
+}
+
+DEFAULT_TOPICS_BY_DEPTH = {
+    "fast": ("theoretical_soundness", "experimental_setup"),
+    "deep": (
+        "novelty_scope",
+        "theoretical_soundness",
+        "experimental_setup",
+        "reproducibility",
+    ),
+    "exhaustive": (
+        "novelty_scope",
+        "theoretical_soundness",
+        "experimental_setup",
+        "reproducibility",
+        "limitations_impact",
+        "statistical_rigor",
+    ),
+}
+
+STRICTNESS_LEVELS = {
+    "constructive": "Constructive Peer",
+    "standard": "Standard Reviewer",
+    "brutal": "Brutal Adversary",
+}
+
+STRICTNESS_FRAMING = {
+    "constructive": (
+        "Be demanding but collaborative. Prioritize the highest-leverage gap, "
+        "acknowledge sound choices, and phrase the critique as a concrete path "
+        "the authors could realistically act on."
+    ),
+    "standard": (
+        "Apply the standards of a careful venue reviewer. Be direct, balanced, "
+        "and proportionate to the evidence; do not soften a material flaw or "
+        "inflate a minor concern."
+    ),
+    "brutal": (
+        "Apply an exacting adversarial standard. Stress-test the strongest "
+        "claims, demand precise evidence for every material choice, and surface "
+        "the most consequential publication-blocking weakness without being "
+        "hostile or speculative."
+    ),
+}
+
+DOMAIN_NAMES = {
+    "ml_cs": "Machine Learning / Computer Science",
+    "life_sciences": "Life Sciences",
+    "social_science": "Social Science",
+    "other": "Other / General Research",
+}
+
+DOMAIN_FRAMING = {
+    "ml_cs": (
+        "Use ML/CS review norms: examine baselines, ablations, data leakage, "
+        "benchmark validity, algorithmic assumptions, compute disclosure, and "
+        "code/configuration reproducibility where relevant."
+    ),
+    "life_sciences": (
+        "Use life-sciences review norms: examine biological controls, sample "
+        "selection, reagent and material traceability, protocol detail, database "
+        "deposition, statistical power, and ethics/consent where applicable. Do "
+        "not demand ML-style ablations unless the work actually uses ML."
+    ),
+    "social_science": (
+        "Use social-science review norms: examine construct validity, sampling "
+        "and generalizability, pre-registration, multiple testing, instruments "
+        "and materials availability, IRB/consent, and plausible alternative "
+        "explanations. Do not import irrelevant ML benchmark conventions."
+    ),
+    "other": (
+        "Use field-neutral scholarly standards and infer appropriate evidence "
+        "norms from the manuscript itself. Avoid imposing ML-specific, wet-lab, "
+        "or human-subject requirements when they do not apply."
+    ),
+}
+
+# ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
 GEMINI_MODEL = "gemini-3.1-flash-lite"

@@ -15,3 +15,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]

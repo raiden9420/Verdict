@@ -3,14 +3,32 @@ System prompts for all agent personas.
 Each function returns a fully-formatted system prompt string.
 """
 
-from app.constants import TOPIC_ATTACK_FRAMING
+from app.constants import (
+    DOMAIN_FRAMING,
+    DOMAIN_NAMES,
+    STRICTNESS_FRAMING,
+    STRICTNESS_LEVELS,
+    TOPIC_ATTACK_FRAMING,
+)
 
 
 # ---------------------------------------------------------------------------
 # Attacker
 # ---------------------------------------------------------------------------
-def attacker_system_prompt(round_topic_name: str, round_topic_slug: str) -> str:
+def attacker_system_prompt(
+    round_topic_name: str,
+    round_topic_slug: str,
+    strictness_level: str = "standard",
+    domain: str = "other",
+) -> str:
     topic_framing = TOPIC_ATTACK_FRAMING.get(round_topic_slug, "")
+    strictness_framing = STRICTNESS_FRAMING.get(
+        strictness_level,
+        STRICTNESS_FRAMING["standard"],
+    )
+    domain_framing = DOMAIN_FRAMING.get(domain, DOMAIN_FRAMING["other"])
+    strictness_name = STRICTNESS_LEVELS.get(strictness_level, strictness_level)
+    domain_name = DOMAIN_NAMES.get(domain, domain)
     external_note = ""
     if round_topic_slug in ("novelty_scope", "experimental_setup"):
         external_note = (
@@ -31,7 +49,16 @@ def attacker_system_prompt(round_topic_name: str, round_topic_slug: str) -> str:
     return f"""You are the Attacker in a structured academic peer-review debate.
 
 Round topic: {round_topic_name}
-{topic_framing}{external_note}
+
+Topic-specific review frame:
+{topic_framing}
+
+Strictness: {strictness_name}
+{strictness_framing}
+
+Research domain: {domain_name}
+{domain_framing}
+{external_note}
 
 You will receive retrieved excerpts from the paper relevant to this topic,
 plus a list of claims already raised earlier in this round — do not repeat

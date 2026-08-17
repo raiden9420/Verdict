@@ -68,6 +68,8 @@ class AuditState(TypedDict):
     round_id: str
     round_topic: str        # slug
     round_topic_name: str   # display name
+    strictness_level: str
+    domain: str
 
     # Exchange tracking
     exchange_number: int    # current exchange (1-indexed)
@@ -244,15 +246,24 @@ def attacker_node(state: AuditState) -> dict:
             supabase = get_supabase()
             paper_res = supabase.table("papers").select("reproducibility_signals").eq("id", state["paper_id"]).execute()
             if paper_res.data and paper_res.data[0].get("reproducibility_signals"):
-                signals = paper_res.data[0]["reproducibility_signals"]
-                reproducibility_section = (
-                    f"## Deterministic Reproducibility Scan Results\n\n"
-                    f"- Code Available: {signals.get('code_available')} (Details: {signals.get('code_details')})\n"
-                    f"- Data Available: {signals.get('data_available')} (Details: {signals.get('data_details')})\n"
-                    f"- Hyperparameters Disclosed: {signals.get('hyperparameters_disclosed')} (Details: {signals.get('hyperparameter_details')})\n"
-                    f"- Compute Disclosed: {signals.get('compute_disclosed')} (Details: {signals.get('compute_details')})\n"
-                    f"- Seed Disclosed: {signals.get('seed_disclosed')} (Details: {signals.get('seed_details')})\n\n"
-                )
+                stored = paper_res.data[0]["reproducibility_signals"]
+                if isinstance(stored, str):
+                    stored = json.loads(stored)
+                by_domain = stored.get("by_domain", {}) if isinstance(stored, dict) else {}
+                effective_domain = state.get("domain", "other")
+                signals = by_domain.get(effective_domain, stored)
+                if isinstance(signals, dict):
+                    signal_lines = [
+                        f"- {key.replace('_', ' ').title()}: {value}"
+                        for key, value in signals.items()
+                        if key != "domain"
+                    ]
+                    reproducibility_section = (
+                        "## Deterministic Reproducibility Scan Results\n\n"
+                        f"Domain profile: {effective_domain}\n"
+                        + "\n".join(signal_lines)
+                        + "\n\n"
+                    )
         except Exception as exc:
             logger.warning("Failed to fetch reproducibility signals: %s", exc)
 
@@ -340,7 +351,12 @@ def attacker_node(state: AuditState) -> dict:
         + f"Now identify the single most significant NEW weakness."
     )
 
-    system = attacker_system_prompt(state["round_topic_name"], state["round_topic"])
+    system = attacker_system_prompt(
+        state["round_topic_name"],
+        state["round_topic"],
+        state.get("strictness_level", "standard"),
+        state.get("domain", "other"),
+    )
     output, _, _ = generate_structured_with_meta(
         llm,
         system,
@@ -780,7 +796,13 @@ def debrief_node(state: AuditState) -> dict:
         try:
             paper_res = supabase.table("papers").select("reproducibility_signals").eq("id", state["paper_id"]).execute()
             if paper_res.data:
-                reproducibility_signals = paper_res.data[0].get("reproducibility_signals")
+                stored = paper_res.data[0].get("reproducibility_signals")
+                if isinstance(stored, str):
+                    stored = json.loads(stored)
+                if isinstance(stored, dict):
+                    reproducibility_signals = stored.get("by_domain", {}).get(
+                        state.get("domain", "other"), stored
+                    )
         except Exception as exc:
             logger.warning("Failed to fetch reproducibility signals in debrief: %s", exc)
 
@@ -799,13 +821,9 @@ def debrief_node(state: AuditState) -> dict:
     }).execute()
 
 
-    # Update round + audit status
+    # The inner graph owns only this round. The Phase 3 outer orchestrator marks
+    # the audit complete after every selected topic and final synthesis finish.
     supabase.table("rounds").update({"status": "completed"}).eq("id", state["round_id"]).execute()
-    # Get audit_id from the round
-    round_data = supabase.table("rounds").select("audit_id").eq("id", state["round_id"]).execute()
-    if round_data.data:
-        audit_id = round_data.data[0]["audit_id"]
-        supabase.table("audits").update({"status": "completed"}).eq("id", audit_id).execute()
 
     # Push SSE event
     callback = state["event_callback"]
@@ -911,6 +929,8 @@ def run_audit(
     round_id: str,
     round_topic: str,
     event_callback: Callable[[dict], None] | None = None,
+    strictness_level: str = "standard",
+    domain: str = "other",
 ) -> dict:
     """
     Execute a full audit round.
@@ -936,6 +956,8 @@ def run_audit(
         "round_id": round_id,
         "round_topic": round_topic,
         "round_topic_name": topic_name,
+        "strictness_level": strictness_level,
+        "domain": domain,
         "exchange_number": 1,
         "attacker_retries": 0,
         "prior_claims": [],

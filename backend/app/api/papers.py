@@ -11,12 +11,19 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import RedirectResponse
 
-from app.api.dependencies import canonical_uuid, get_session_id, get_session_query_id
+from app.api.dependencies import CurrentUser, canonical_uuid, get_current_user
 from app.constants import EMBEDDING_SPACE_ID, MAX_PDF_SIZE_BYTES
-from app.database import get_supabase
+from app.database import (
+    get_service_supabase,
+    get_supabase,
+    get_user_supabase,
+    use_supabase,
+)
 from app.models.schemas import (
     ErrorResponse,
+    PaperSummaryResponse,
     PaperUploadResponse,
+    PdfUrlResponse,
     RelevanceRejectionDetail,
 )
 from app.services.embedding_service import EmbeddingServiceError, embed_batch
@@ -31,7 +38,7 @@ from app.services.relevance_service import (
     RelevanceServiceUnavailable,
     classify_document_relevance,
 )
-from app.services.reproducibility_service import scan_paper_reproducibility
+from app.services.reproducibility_service import scan_reproducibility_by_domain
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["papers"])
@@ -72,9 +79,9 @@ def _build_relevance_sample(pages: list[tuple[int, str]]) -> str:
 
 
 def _insert_paper_compat(supabase: Any, paper_data: dict[str, Any]) -> None:
-    """Insert with compatibility for deployments awaiting optional migrations."""
+    """Insert a paper while tolerating only non-security optional old columns."""
     row = dict(paper_data)
-    optional_columns = ("session_id", "reproducibility_signals", "embedding_space")
+    optional_columns = ("reproducibility_signals", "embedding_space", "detected_domain")
     while True:
         try:
             supabase.table("papers").insert(row).execute()
@@ -120,7 +127,10 @@ def _persist_ingestion(
     *,
     paper_id: str,
     filename: str,
-    session_id: str,
+    user_id: str,
+    detected_domain: str,
+    parent_paper_id: str | None,
+    version_number: int,
     file_bytes: bytes,
     parsed: dict[str, Any],
     chunks: list[dict[str, Any]],
@@ -149,7 +159,10 @@ def _persist_ingestion(
                 "filename": filename,
                 "storage_path": storage_path,
                 "page_count": parsed["page_count"],
-                "session_id": session_id,
+                "user_id": user_id,
+                "detected_domain": detected_domain,
+                "parent_paper_id": parent_paper_id,
+                "version_number": version_number,
                 "reproducibility_signals": reproducibility_signals,
                 "embedding_space": EMBEDDING_SPACE_ID,
             },
@@ -177,6 +190,78 @@ def _persist_ingestion(
         raise
 
 
+def _resolve_version_link(
+    supabase: Any,
+    parent_paper_id: str | None,
+) -> tuple[str | None, int]:
+    """Resolve a selected prior version to the owned version-series root."""
+    if not parent_paper_id:
+        return None, 1
+
+    parent_id = canonical_uuid(parent_paper_id, "parent_paper_id")
+    parent_result = (
+        supabase.table("papers")
+        .select("id, parent_paper_id, version_number")
+        .eq("id", parent_id)
+        .limit(1)
+        .execute()
+    )
+    if not parent_result.data:
+        # RLS intentionally makes a foreign user's UUID indistinguishable from
+        # a nonexistent paper.
+        raise HTTPException(status_code=404, detail="Parent paper not found")
+
+    parent = parent_result.data[0]
+    root_id = str(parent.get("parent_paper_id") or parent["id"])
+    series = (
+        supabase.table("papers")
+        .select("version_number")
+        .or_(f"id.eq.{root_id},parent_paper_id.eq.{root_id}")
+        .order("version_number", desc=True)
+        .limit(1)
+        .execute()
+    )
+    highest = max(
+        [int(row.get("version_number") or 1) for row in (series.data or [])]
+        or [int(parent.get("version_number") or 1)]
+    )
+    return root_id, highest + 1
+
+
+def _next_version_number(supabase: Any, root_id: str, user_id: str) -> int:
+    """Re-read a version family immediately before the trusted insert."""
+    result = (
+        supabase.table("papers")
+        .select("version_number")
+        .eq("user_id", user_id)
+        .or_(f"id.eq.{root_id},parent_paper_id.eq.{root_id}")
+        .order("version_number", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise RuntimeError("The selected paper version family no longer exists")
+    return int(result.data[0].get("version_number") or 1) + 1
+
+
+def _is_version_number_conflict(exc: Exception) -> bool:
+    """Identify only the revision-series unique constraint for safe retry."""
+    details = " ".join(
+        str(value)
+        for value in (
+            exc,
+            getattr(exc, "code", ""),
+            getattr(exc, "message", ""),
+            getattr(exc, "details", ""),
+        )
+    ).lower()
+    return "uq_papers_parent_version" in details or (
+        "23505" in details
+        and "parent_paper_id" in details
+        and "version_number" in details
+    )
+
+
 @router.post(
     "/papers",
     response_model=PaperUploadResponse,
@@ -189,11 +274,29 @@ def _persist_ingestion(
 async def upload_paper(
     file: UploadFile = File(...),
     force: bool = Query(False),
-    session_id: str = Depends(get_session_id),
+    parent_paper_id: str | None = Query(None),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """Validate and ingest one research PDF, unless the user explicitly overrides."""
     filename = (file.filename or "upload.pdf").strip() or "upload.pdf"
     paper_id = str(uuid.uuid4())
+    user_supabase = get_user_supabase(current_user.access_token)
+    service_supabase = get_service_supabase()
+
+    try:
+        parent_root_id, version_number = await asyncio.to_thread(
+            _resolve_version_link,
+            user_supabase,
+            parent_paper_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to authorize parent paper %s: %s", parent_paper_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Paper version service is temporarily unavailable.",
+        ) from exc
 
     # A bounded read rejects oversized uploads without loading the remainder into RAM.
     file_bytes = await file.read(MAX_PDF_SIZE_BYTES + 1)
@@ -214,10 +317,9 @@ async def upload_paper(
     except PDFValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # The object key is an ownership fallback for deployments while the
-    # papers.session_id migration is rolling out. UUID validation makes both
-    # path segments safe and non-ambiguous.
-    parsed["storage_path"] = f"{session_id}/{paper_id}.pdf"
+    # Storage RLS policies scope objects by the authenticated user's first path
+    # segment. Both values are canonical UUIDs, so the key is unambiguous.
+    parsed["storage_path"] = f"{current_user.id}/{paper_id}.pdf"
 
     # Classification is mandatory even for an override. ``force`` changes what
     # happens after a confident non-research result; it never bypasses an outage.
@@ -284,23 +386,64 @@ async def upload_paper(
             },
         ) from exc
 
-    reproducibility_signals = await asyncio.to_thread(
-        scan_paper_reproducibility,
+    reproducibility_by_domain = await asyncio.to_thread(
+        scan_reproducibility_by_domain,
         parsed["pages"],
     )
+    reproducibility_signals = {
+        "detected_domain": relevance.detected_domain,
+        "by_domain": reproducibility_by_domain,
+    }
 
+    persisted_version_number = version_number
     try:
-        await asyncio.to_thread(
-            _persist_ingestion,
-            paper_id=paper_id,
-            filename=filename,
-            session_id=session_id,
-            file_bytes=file_bytes,
-            parsed=parsed,
-            chunks=chunks,
-            embeddings=embeddings,
-            reproducibility_signals=reproducibility_signals,
-        )
+        def persist_as_backend() -> None:
+            nonlocal persisted_version_number
+            # Ownership was established by the verified JWT above. Mutations
+            # use the backend identity so a queued/large upload cannot fail if
+            # the browser token rotates, and public users never receive direct
+            # write privileges to trusted audit artifacts or Storage.
+            with use_supabase(service_supabase):
+                # The unique family/version index is the final arbiter. A
+                # concurrent revision upload can win between the initial UI
+                # ownership lookup and this insert, so refresh and retry only
+                # that well-identified conflict without repeating parsing,
+                # embeddings, or classification.
+                for attempt in range(4):
+                    if parent_root_id:
+                        persisted_version_number = _next_version_number(
+                            service_supabase,
+                            parent_root_id,
+                            current_user.id,
+                        )
+                    try:
+                        _persist_ingestion(
+                            paper_id=paper_id,
+                            filename=filename,
+                            user_id=current_user.id,
+                            detected_domain=relevance.detected_domain,
+                            parent_paper_id=parent_root_id,
+                            version_number=persisted_version_number,
+                            file_bytes=file_bytes,
+                            parsed=parsed,
+                            chunks=chunks,
+                            embeddings=embeddings,
+                            reproducibility_signals=reproducibility_signals,
+                        )
+                        return
+                    except Exception as exc:
+                        if (
+                            not parent_root_id
+                            or attempt == 3
+                            or not _is_version_number_conflict(exc)
+                        ):
+                            raise
+                        logger.info(
+                            "Paper version %d was allocated concurrently; retrying",
+                            persisted_version_number,
+                        )
+
+        await asyncio.to_thread(persist_as_backend)
     except Exception as exc:
         logger.exception("Atomic ingestion failed for paper %s: %s", paper_id, exc)
         raise HTTPException(
@@ -323,58 +466,60 @@ async def upload_paper(
         filename=filename,
         page_count=parsed["page_count"],
         chunk_count=len(chunks),
+        detected_domain=relevance.detected_domain,
+        parent_paper_id=parent_root_id,
+        version_number=persisted_version_number,
     )
 
 
-def _load_authorized_pdf(paper_id: str, session_id: str) -> str | None:
-    """Return storage path if the session owns the paper (or its legacy audit)."""
-    supabase = get_supabase()
-    try:
-        result = (
+@router.get("/papers", response_model=list[PaperSummaryResponse])
+async def list_papers(current_user: CurrentUser = Depends(get_current_user)):
+    """List the signed-in user's paper/version history (RLS enforced)."""
+    supabase = get_user_supabase(current_user.access_token)
+    result = await asyncio.to_thread(
+        lambda: (
             supabase.table("papers")
-            .select("storage_path, session_id")
-            .eq("id", paper_id)
+            .select(
+                "id, filename, page_count, detected_domain, parent_paper_id, "
+                "version_number, uploaded_at"
+            )
+            .eq("user_id", current_user.id)
+            .order("uploaded_at", desc=True)
             .execute()
         )
-        if not result.data:
-            return None
-        row = result.data[0]
-        if row.get("session_id") == session_id:
-            return row.get("storage_path")
-        if row.get("session_id"):
-            return None
-        storage_path = row.get("storage_path")
-    except Exception as exc:
-        if not _missing_column(exc, "session_id"):
-            raise
-        result = (
-            supabase.table("papers")
-            .select("storage_path")
-            .eq("id", paper_id)
-            .execute()
+    )
+    return [
+        PaperSummaryResponse(
+            id=str(row["id"]),
+            filename=str(row.get("filename") or "paper.pdf"),
+            page_count=row.get("page_count"),
+            detected_domain=row.get("detected_domain") or "other",
+            parent_paper_id=(
+                str(row["parent_paper_id"]) if row.get("parent_paper_id") else None
+            ),
+            version_number=int(row.get("version_number") or 1),
+            uploaded_at=str(row.get("uploaded_at") or ""),
         )
-        if not result.data:
-            return None
-        storage_path = result.data[0].get("storage_path")
+        for row in (result.data or [])
+    ]
 
-    if storage_path == f"{session_id}/{paper_id}.pdf":
-        return storage_path
 
-    # Compatibility path for papers created before session ownership existed.
-    audit = (
-        supabase.table("audits")
-        .select("id")
-        .eq("paper_id", paper_id)
-        .eq("session_id", session_id)
+def _load_authorized_pdf(supabase: Any, paper_id: str, user_id: str) -> str | None:
+    """Return an owned storage path; RLS provides the primary boundary."""
+    result = (
+        supabase.table("papers")
+        .select("storage_path")
+        .eq("id", paper_id)
+        .eq("user_id", user_id)
         .limit(1)
         .execute()
     )
-    return storage_path if audit.data else None
+    return result.data[0].get("storage_path") if result.data else None
 
 
-def _create_signed_pdf_url(storage_path: str) -> str:
+def _create_signed_pdf_url(storage_path: str, supabase: Any | None = None) -> str:
     signed = (
-        get_supabase()
+        (supabase or get_supabase())
         .storage.from_("papers")
         .create_signed_url(storage_path, expires_in=5 * 60)
     )
@@ -384,32 +529,49 @@ def _create_signed_pdf_url(storage_path: str) -> str:
     return str(url)
 
 
-@router.get("/papers/{paper_id}/pdf")
-async def serve_pdf(
+async def _signed_pdf_for_user(
     paper_id: str,
-    session_id: str = Depends(get_session_query_id),
-):
-    """Authorize and redirect the document viewer to its stored PDF."""
+    current_user: CurrentUser,
+) -> str:
     paper_id = canonical_uuid(paper_id, "paper_id")
+    supabase = get_user_supabase(current_user.access_token)
     try:
         storage_path = await asyncio.to_thread(
             _load_authorized_pdf,
+            supabase,
             paper_id,
-            session_id,
+            current_user.id,
         )
     except Exception as exc:
         logger.exception("Failed to authorize PDF %s: %s", paper_id, exc)
         raise HTTPException(status_code=503, detail="PDF service is temporarily unavailable.") from exc
     if not storage_path:
-        # Do not reveal whether another session owns the UUID.
+        # Do not reveal whether another account owns the UUID.
         raise HTTPException(status_code=404, detail="PDF not found")
 
     try:
-        url = await asyncio.to_thread(_create_signed_pdf_url, storage_path)
+        return await asyncio.to_thread(_create_signed_pdf_url, storage_path, supabase)
     except Exception as exc:
         logger.exception("Failed to sign PDF URL for %s: %s", paper_id, exc)
         raise HTTPException(
             status_code=503,
             detail="PDF service is temporarily unavailable.",
         ) from exc
-    return RedirectResponse(url)
+
+
+@router.get("/papers/{paper_id}/pdf")
+async def serve_pdf(
+    paper_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Preserve the Phase 1/2 redirect endpoint with Bearer authentication."""
+    return RedirectResponse(await _signed_pdf_for_user(paper_id, current_user))
+
+
+@router.get("/papers/{paper_id}/pdf-url", response_model=PdfUrlResponse)
+async def get_pdf_url(
+    paper_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Return a short-lived URL for an authenticated iframe/browser tab."""
+    return PdfUrlResponse(url=await _signed_pdf_for_user(paper_id, current_user))

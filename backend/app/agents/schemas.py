@@ -102,3 +102,25 @@ class DebriefOutput(StrictAgentModel):
     solidified_strengths: Annotated[list[NonEmptyText], Field(max_length=100)]
     actionable_weaknesses: Annotated[list[NonEmptyText], Field(max_length=100)]
     contested_points: Annotated[list[NonEmptyText], Field(max_length=100)]
+
+
+class AuthorFinalReportOutput(StrictAgentModel):
+    overall_assessment: Annotated[StrictStr, Field(min_length=1, max_length=20000)]
+    preserved_strengths: Annotated[list[NonEmptyText], Field(max_length=100)]
+    priority_revisions: Annotated[list[NonEmptyText], Field(max_length=100)]
+    open_judgment_calls: Annotated[list[NonEmptyText], Field(max_length=100)]
+    revision_plan: Annotated[list[NonEmptyText], Field(max_length=100)]
+
+
+class ReviewerFinalReportOutput(StrictAgentModel):
+    strengths: Annotated[list[NonEmptyText], Field(max_length=100)]
+    weaknesses: Annotated[list[NonEmptyText], Field(max_length=100)]
+    questions_for_authors: Annotated[list[NonEmptyText], Field(max_length=100)]
+    recommendation: Annotated[StrictStr, Field(min_length=1, max_length=12000)]
+
+
+class VersionDiffOutput(StrictAgentModel):
+    resolved_issues: Annotated[list[NonEmptyText], Field(max_length=100)]
+    still_open_issues: Annotated[list[NonEmptyText], Field(max_length=100)]
+    new_issues: Annotated[list[NonEmptyText], Field(max_length=100)]
+    summary: Annotated[StrictStr, Field(min_length=1, max_length=12000)]
