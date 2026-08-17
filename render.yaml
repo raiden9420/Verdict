@@ -14,8 +14,11 @@ services:
         sync: false
       - key: SUPABASE_URL
         sync: false
+      # Supabase publishable keys are browser-safe and already ship in the
+      # frontend bundle. Pinning it here lets the existing Blueprint upgrade
+      # from the Phase 2 service without substituting the service-role key.
       - key: SUPABASE_ANON_KEY
-        sync: false
+        value: sb_publishable_2vkB4FsDLPYyzjns6qcluw_oFU5QG8f
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: FRONTEND_ORIGINS
