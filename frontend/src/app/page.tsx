@@ -419,6 +419,7 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <header className="topbar" inert={relevancePrompt ? true : undefined}>
         <div className="brand-lockup"><span className="verdict-wordmark">Verdict</span><span className="brand-divider" /><span className="product-name">ADVERSARIAL AUDIT</span></div>
         <div className="topbar-meta"><span className="trust-mark"><PIcon name="check" /> Evidence-grounded</span><ThemeToggle /><div className="account-control"><span title={userEmail}>{userEmail}</span><button type="button" onClick={onSignOut} disabled={signingOut}>{signingOut ? "Logging out…" : "Log out"}</button></div></div>
@@ -436,7 +437,7 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
         <div className="sidebar-footer"><div className="mini-label">CURRENT PAPER</div><div className="paper-mini"><PIcon name="document" /><span>{workspacePaperName || "No paper selected"}</span></div><div className="paper-mini-meta">{activeAudit ? `Version ${activeAudit.versionNumber} · ${activeAudit.roundTopics.length || "…"} topics` : file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : ""}</div></div>
       </aside>
 
-      <main className="main-content" inert={relevancePrompt ? true : undefined}>
+      <main id="main-content" className="main-content" inert={relevancePrompt ? true : undefined} tabIndex={-1}>
         {restoringAudit && <div className="workspace-loading" role="status"><span className="loading-mark" aria-hidden="true" /><strong>Restoring your private workspace</strong><span>Loading the active audit and account-scoped history.</span></div>}
         {!restoringAudit && view === "setup" && <AuditSetup file={file} preparedPaper={preparedPaper} revisionBase={revisionBase} comparisonAudits={comparisonAudits} comparisonAuditId={comparisonAuditId} strictness={strictness} depth={depth} topics={topics} mode={mode} domainSelection={domainSelection} preparing={preparing} launching={launching} error={setupError} auditRunning={auditRunning} onUpload={() => fileInputRef.current?.click()} onFileDrop={selectFile} onRemove={clearSelectedFile} onPrepare={() => { void preparePaper(); }} onLaunch={() => { void launchAudit(); }} onCancelRevision={() => { setRevisionBase(null); setComparisonAuditId(null); }} onComparisonChange={changeComparison} onStrictnessChange={setStrictness} onDepthChange={changeDepth} onTopicToggle={toggleTopic} onModeChange={setMode} onDomainChange={setDomainSelection} />}
         <input ref={fileInputRef} type="file" accept=".pdf,application/pdf" onChange={(event) => selectFile(event.target.files?.[0])} className="file-input" />

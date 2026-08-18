@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef } from "react";
-import { PButton, PButtonPure, PIcon, PTag, PText } from "@porsche-design-system/components-react";
+import { PButton, PButtonPure, PIcon, PTag } from "@porsche-design-system/components-react";
 import {
   DEPTH_OPTIONS,
   DOMAIN_LABELS,
@@ -83,7 +83,7 @@ export function AuditSetup({
     <div className="setup-page phase3-setup" aria-busy={busy}>
       <span className="visually-hidden" role="status" aria-live="polite">{preparing ? "Preparing and classifying the paper." : launching ? "Starting the configured audit." : ""}</span>
       <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH INTEGRITY / NEW AUDIT</div>
-      <div className="setup-heading"><div><h1>Put every claim<br /><em>under pressure.</em></h1><PText size="medium">Configure the scrutiny, cover multiple research dimensions,<br />and leave with a paper-level report.</PText></div></div>
+      <div className="setup-heading"><div><h1>Put every claim<br /><em>under pressure.</em></h1><p>Configure the scrutiny, cover multiple research dimensions, and leave with a clear paper-level report.</p></div></div>
 
       {revisionBase && (
         <section className="revision-banner">
@@ -165,7 +165,7 @@ export function AuditSetup({
 
 function ChoiceCards<Value extends string>({ label, value, options, onChange, disabled, compact = false }: { label: string; value: Value; options: ReadonlyArray<Choice<Value>>; onChange: (value: Value) => void; disabled: boolean; compact?: boolean }) {
   const name = useId();
-  return <fieldset className={`option-group ${compact ? "compact" : ""}`} disabled={disabled}><legend>{label}</legend><div className="option-list">{options.map((option) => <label key={option.value} className={`option-card ${value === option.value ? "selected" : ""}`}><input className="option-radio visually-hidden" type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} /><span className="radio-dot" aria-hidden="true" /><span className="option-copy"><strong>{option.label}</strong><small>{option.description}</small></span>{value === option.value && <PIcon name="check" />}</label>)}</div></fieldset>;
+  return <fieldset className={`option-group option-count-${options.length} ${compact ? "compact" : ""}`} disabled={disabled}><legend>{label}</legend><div className="option-list">{options.map((option) => <label key={option.value} className={`option-card ${value === option.value ? "selected" : ""}`}><input className="option-radio visually-hidden" type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} /><span className="radio-dot" aria-hidden="true" /><span className="option-copy"><strong>{option.label}</strong><small>{option.description}</small></span>{value === option.value && <PIcon name="check" />}</label>)}</div></fieldset>;
 }
 
 export function RelevanceDialog({ prompt, loading, onChangeDocument, onProceed }: { prompt: RelevancePrompt; loading: boolean; onChangeDocument: () => void; onProceed: () => void }) {

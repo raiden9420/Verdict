@@ -7,6 +7,7 @@ import { fetchFinalReportMarkdown, retryVersionDiffs } from "@/lib/api";
 import { DOMAIN_LABELS, topicName } from "@/lib/audit-config";
 import type { ActiveAudit } from "@/lib/audit-workspace";
 import type { VersionDiff } from "@/types";
+import { MarkdownReport } from "./MarkdownReport";
 
 function safeFilename(filename: string): string {
   const stem = filename.replace(/\.pdf$/i, "").replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -119,7 +120,7 @@ export function FinalReportView({
           {stream.finalReport ? <PTag variant="success">Final</PTag> : stream.status === "error" ? <PTag variant="error">Unavailable</PTag> : <PTag variant="warning">Synthesizing</PTag>}
         </div>
         {stream.finalReport ? (
-          <pre className="markdown-report">{stream.finalReport.content}</pre>
+          <MarkdownReport content={stream.finalReport.content} />
         ) : (
           <div className="report-pending"><span className="loading-mark" aria-hidden="true" /><strong>{stream.status === "error" ? "No final report was produced" : "Synthesizing across all topic debriefs"}</strong><span>{stream.status === "error" ? stream.auditError || "The audit stopped before report synthesis." : "The report appears after every selected topic completes."}</span></div>
         )}
@@ -139,7 +140,7 @@ export function FinalReportView({
             {versionDiffs.map((diff) => (
               <details key={diff.id} className="version-diff-card" open>
                 <summary><span><PIcon name="compare" /><strong>{topicName(diff.round_topic)}</strong></span><span>Compared with {diff.audit_id_old.slice(0, 8)}</span></summary>
-                <pre>{diff.diff_summary}</pre>
+                <MarkdownReport content={diff.diff_summary} variant="compact" />
               </details>
             ))}
           </div>
@@ -148,7 +149,7 @@ export function FinalReportView({
         )}
       </section>
 
-      <div className="arena-bottom"><span><PIcon name="information" /> Markdown is displayed as text and exported from the stored report.</span><PButton type="button" variant="secondary" icon="upload" onClick={onNewVersion}>Upload a new version</PButton></div>
+      <div className="arena-bottom"><span><PIcon name="information" /> The formatted report can also be downloaded as Markdown.</span><PButton type="button" variant="secondary" icon="upload" onClick={onNewVersion}>Upload a new version</PButton></div>
     </div>
   );
 }

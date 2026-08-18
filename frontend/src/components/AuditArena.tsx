@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { PButton, PIcon, PTag } from "@porsche-design-system/components-react";
 import DocumentViewer from "@/components/DocumentViewer";
 import { DOMAIN_LABELS, topicName } from "@/lib/audit-config";
@@ -27,6 +27,8 @@ export function AuditArena({
   );
   const [selectedRoundKey, setSelectedRoundKey] = useState(rounds[0]?.key || "");
   const [followLive, setFollowLive] = useState(true);
+  const topicTabsId = useId();
+  const topicTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeRoundPlan = useMemo(
     () => rounds.find((round) =>
       Boolean(stream.activeRound?.round_id && round.id === stream.activeRound.round_id) ||
@@ -84,6 +86,35 @@ export function AuditArena({
 
   const statusLabel = auditStatusLabel(stream.status, stream.connectionState);
   const statusTone = stream.status === "completed" ? "complete" : stream.status === "error" ? "failed" : stream.connectionState === "live" ? "live" : "connecting";
+  const selectRound = (roundKey: string) => {
+    setSelectedRoundKey(roundKey);
+    setFollowLive(false);
+  };
+  const handleTopicTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    let nextIndex: number;
+    switch (event.key) {
+      case "ArrowRight":
+        nextIndex = (currentIndex + 1) % rounds.length;
+        break;
+      case "ArrowLeft":
+        nextIndex = (currentIndex - 1 + rounds.length) % rounds.length;
+        break;
+      case "Home":
+        nextIndex = 0;
+        break;
+      case "End":
+        nextIndex = rounds.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    selectRound(rounds[nextIndex].key);
+    topicTabRefs.current[nextIndex]?.focus();
+  };
+  const topicTabId = (round: RoundPlan) => `${topicTabsId}-topic-${round.number}-tab`;
+  const topicPanelId = (round: RoundPlan) => `${topicTabsId}-topic-${round.number}-panel`;
 
   return (
     <div className="arena-page phase3-arena">
@@ -107,12 +138,25 @@ export function AuditArena({
         <span className={`audit-status ${statusTone}`}><i aria-hidden="true" /> {statusLabel}</span>
       </div>
 
-      <div className="round-topic-tabs" role="tablist" aria-label="Audit topics">
-        {rounds.map((round) => {
+      <div className="round-topic-tabs" role="tablist" aria-label="Audit topics" aria-orientation="horizontal">
+        {rounds.map((round, index) => {
           const state = roundState(round, rounds, stream);
           const verdictCount = stream.verdicts.filter((verdict) => roundMatches(verdict, round, rounds.length)).length;
+          const isSelected = round.key === selectedRound.key;
           return (
-            <button key={round.key} type="button" role="tab" aria-selected={round.key === selectedRound.key} className={`round-topic-tab ${round.key === selectedRound.key ? "selected" : ""} ${state}`} onClick={() => { setSelectedRoundKey(round.key); setFollowLive(false); }}>
+            <button
+              key={round.key}
+              ref={(element) => { topicTabRefs.current[index] = element; }}
+              id={topicTabId(round)}
+              type="button"
+              role="tab"
+              aria-controls={topicPanelId(round)}
+              aria-selected={isSelected}
+              tabIndex={isSelected ? 0 : -1}
+              className={`round-topic-tab ${isSelected ? "selected" : ""} ${state}`}
+              onClick={() => selectRound(round.key)}
+              onKeyDown={(event) => handleTopicTabKeyDown(event, index)}
+            >
               <span>{String(round.number).padStart(2, "0")}</span>
               <strong>{round.topicName || topicName(round.topic)}</strong>
               <small>{state === "complete" ? "Debrief ready" : state === "active" ? `${verdictCount}/3 adjudicated · Live` : `${verdictCount}/3 adjudicated`}</small>
@@ -127,31 +171,42 @@ export function AuditArena({
       {stream.auditError && <div className="pipeline-alert error" role="alert"><PIcon name="error-filled" /><div><strong>Audit stopped</strong><span>{stream.auditError}</span></div></div>}
       {stream.transportError && stream.status !== "error" && <div className="pipeline-alert recovery" role="status"><PIcon name="information" /><div><strong>Some saved results are still syncing</strong><span>{stream.transportError}</span></div></div>}
 
-      <div className="round-strip">
-        <div className="round-progress" role="progressbar" aria-label={`${topicName(selectedRound.topic)} exchanges adjudicated`} aria-valuemin={0} aria-valuemax={TOTAL_EXCHANGES} aria-valuenow={adjudicatedExchanges}>
-          {Array.from({ length: TOTAL_EXCHANGES }, (_, index) => {
-            const exchange = index + 1;
-            const progressClass = exchange <= adjudicatedExchanges ? "progress-complete" : exchange === activeExchange && selectedIsLive ? "progress-active" : "";
-            return <span key={exchange} className={progressClass} />;
-          })}
-        </div>
-        <div><strong>TOPIC {String(selectedRound.number).padStart(2, "0")} · EXCHANGE {String(activeExchange).padStart(2, "0")} OF 03</strong><span>{topicName(selectedRound.topic)}</span></div>
-      </div>
-
-      <div className="arena-grid">
-        <section className="document-panel"><DocumentViewer key={audit.paperId} paperId={audit.paperId} highlightedPages={highlightedPages} /></section>
-        <section className="debate-panel">
-          <div className="panel-top"><span className="panel-title">{selectedIsLive ? <span className="live-bars" aria-hidden="true"><i /><i /><i /></span> : <PIcon name={selectedRoundComplete ? "check" : "information"} />}{selectedIsLive ? "LIVE TOPIC TRANSCRIPT" : "TOPIC TRANSCRIPT"}</span><span>{selectedRoundComplete ? "COMPLETE" : selectedIsLive ? "LIVE" : "QUEUED"}</span></div>
-          <div ref={feedRef} className="agent-feed" role="log" aria-label={`${topicName(selectedRound.topic)} transcript`} aria-live="polite" tabIndex={0} onScroll={(event) => { const feed = event.currentTarget; followFeedRef.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80; }}>
-            {selectedIsLive && stream.processMessage && <div className="process-update" role="status"><PIcon name="globe" /><span>{stream.processMessage}</span></div>}
-            {!displayedTurns.length && <div className="empty-transcript"><PIcon name="clock" /><strong>{selectedIsLive ? "This topic is starting" : "Waiting for this topic"}</strong><span>The three-exchange transcript will appear here.</span></div>}
-            {displayedTurns.map((turn) => <AgentMessage key={turn.id || `${selectedRound.key}-${turn.exchange_number}-${turn.sequence}-${turn.agent_type}`} turn={turn} allRoundTurns={roundTurns} />)}
-            {selectedIsLive && <div className="typing"><span className="typing-avatar">AI</span><span>Agent is formulating a response</span><i /><i /><i /></div>}
+      <div
+        id={topicPanelId(selectedRound)}
+        role="tabpanel"
+        aria-labelledby={topicTabId(selectedRound)}
+        tabIndex={0}
+        style={{ display: "flex", flexDirection: "column", gap: "inherit" }}
+      >
+        <div className="round-strip">
+          <div className="round-progress" role="progressbar" aria-label={`${topicName(selectedRound.topic)} exchanges adjudicated`} aria-valuemin={0} aria-valuemax={TOTAL_EXCHANGES} aria-valuenow={adjudicatedExchanges}>
+            {Array.from({ length: TOTAL_EXCHANGES }, (_, index) => {
+              const exchange = index + 1;
+              const progressClass = exchange <= adjudicatedExchanges ? "progress-complete" : exchange === activeExchange && selectedIsLive ? "progress-active" : "";
+              return <span key={exchange} className={progressClass} />;
+            })}
           </div>
-        </section>
-      </div>
+          <div><strong>TOPIC {String(selectedRound.number).padStart(2, "0")} · EXCHANGE {String(activeExchange).padStart(2, "0")} OF 03</strong><span>{topicName(selectedRound.topic)}</span></div>
+        </div>
 
-      <ExchangeVerdicts verdicts={roundVerdicts} status={selectedRoundComplete ? "completed" : stream.status} />
+        <div className="arena-grid">
+          <section className="document-panel"><DocumentViewer key={audit.paperId} paperId={audit.paperId} highlightedPages={highlightedPages} /></section>
+          <section className="debate-panel">
+            <div className="panel-top"><span className="panel-title">{selectedIsLive ? <span className="live-bars" aria-hidden="true"><i /><i /><i /></span> : <PIcon name={selectedRoundComplete ? "check" : "information"} />}{selectedIsLive ? "LIVE TOPIC TRANSCRIPT" : "TOPIC TRANSCRIPT"}</span><span>{selectedRoundComplete ? "COMPLETE" : selectedIsLive ? "LIVE" : "QUEUED"}</span></div>
+            <div ref={feedRef} className="agent-feed" role="log" aria-label={`${topicName(selectedRound.topic)} transcript`} aria-live="polite" tabIndex={0} onScroll={(event) => { const feed = event.currentTarget; followFeedRef.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80; }}>
+              {selectedIsLive && stream.processMessage && <div className="process-update" role="status"><PIcon name="globe" /><span>{stream.processMessage}</span></div>}
+              {!displayedTurns.length && <div className="empty-transcript"><PIcon name="clock" /><strong>{selectedIsLive ? "This topic is starting" : "Waiting for this topic"}</strong><span>The three-exchange transcript will appear here.</span></div>}
+              {displayedTurns.map((turn) => <AgentMessage key={turn.id || `${selectedRound.key}-${turn.exchange_number}-${turn.sequence}-${turn.agent_type}`} turn={turn} allRoundTurns={roundTurns} />)}
+              {selectedIsLive && <div className="typing"><span className="typing-avatar">AI</span><span>Agent is formulating a response</span><i /><i /><i /></div>}
+            </div>
+          </section>
+        </div>
+
+        <ExchangeVerdicts verdicts={roundVerdicts} status={selectedRoundComplete ? "completed" : stream.status} />
+      </div>
+      {rounds.filter((round) => round.key !== selectedRound.key).map((round) => (
+        <div key={round.key} id={topicPanelId(round)} role="tabpanel" aria-labelledby={topicTabId(round)} tabIndex={-1} hidden />
+      ))}
       <section className="topic-debriefs" aria-labelledby="topic-debriefs-title">
         <div className="verdicts-header"><div><span className="section-kicker">ONE CARD PER ROUND TOPIC</span><h2 id="topic-debriefs-title">Topic debriefs</h2></div><span>{completedRounds} / {rounds.length} ready</span></div>
         <div className="topic-debrief-list">{rounds.map((round) => { const card = stream.debriefs.find((item) => roundMatches(item, round, rounds.length)) || null; return <TopicDebrief key={round.key} round={round} debrief={card} status={stream.status} defaultOpen={round.key === selectedRound.key} />; })}</div>
