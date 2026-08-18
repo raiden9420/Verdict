@@ -23,6 +23,8 @@ services:
         sync: false
       - key: FRONTEND_ORIGINS
         value: https://verdict-nu-rouge.vercel.app
+      - key: FRONTEND_ORIGIN_REGEX
+        value: '^https://verdict-[a-z0-9-]+-response-composer\.vercel\.app$'
       - key: GROQ_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY

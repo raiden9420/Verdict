@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import FRONTEND_ORIGINS, validate_config
+from app.config import FRONTEND_ORIGIN_REGEX, FRONTEND_ORIGINS, validate_config
 from app.api.papers import router as papers_router
 from app.api.audits import (
     recover_orphaned_audits,
@@ -76,6 +76,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(FRONTEND_ORIGINS),
+    allow_origin_regex=FRONTEND_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

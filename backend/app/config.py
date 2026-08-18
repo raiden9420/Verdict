@@ -47,6 +47,17 @@ FRONTEND_ORIGINS: tuple[str, ...] = tuple(
     if origin.strip()
 )
 
+# Vercel gives every production/preview build an immutable deployment URL in
+# addition to the stable alias. Keep credentialed CORS scoped to this one
+# project/team rather than allowing arbitrary ``*.vercel.app`` origins.
+FRONTEND_ORIGIN_REGEX: str | None = (
+    os.environ.get(
+        "FRONTEND_ORIGIN_REGEX",
+        r"^https://verdict-[a-z0-9-]+-response-composer\.vercel\.app$",
+    ).strip()
+    or None
+)
+
 
 
 def validate_config() -> None:

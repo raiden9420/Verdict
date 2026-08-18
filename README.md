@@ -137,7 +137,9 @@ uvicorn app.main:app --reload --port 8000
 For production, set `FRONTEND_ORIGINS` to a comma-separated list of exact
 frontend origins. `render.yaml` already pins the current production Vercel
 origin; change it when moving to a custom domain. It also lists every backend
-variable used by the deployed service.
+variable used by the deployed service. `FRONTEND_ORIGIN_REGEX` separately
+allows only this project's immutable Vercel deployment/preview URLs; do not
+replace it with a broad `*.vercel.app` rule when credentials are enabled.
 
 ## 3. Frontend
 
