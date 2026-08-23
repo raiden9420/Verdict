@@ -107,7 +107,7 @@ export function AuditSetup({
           </button>
         )}
         {file && !preparedPaper && <div className="prepare-row"><div><strong>Prepare before configuration</strong><span>We extract the PDF, run the relevance gate, and detect its research domain once.</span></div><PButton type="button" variant="secondary" loading={preparing} disabled={busy} onClick={onPrepare}>Prepare paper</PButton></div>}
-        {preparedPaper && <div className="prepared-summary"><div><span className="small-muted">DETECTED DOMAIN</span><strong>{DOMAIN_LABELS[preparedPaper.detectedDomain]}</strong></div><div><span className="small-muted">DOCUMENT</span><strong>{preparedPaper.pageCount} pages · {preparedPaper.chunkCount} evidence chunks</strong></div><PTag variant="success" icon="check">Relevance passed</PTag></div>}
+        {preparedPaper && <div className="prepared-summary"><div><span className="small-muted">DETECTED DOMAIN</span><strong>{DOMAIN_LABELS[preparedPaper.detectedDomain]}</strong></div><div><span className="small-muted">DOCUMENT</span><strong>{preparedPaper.pageCount} pages · {preparedPaper.chunkCount} evidence chunks</strong></div><span className="prepared-status"><PIcon name="check" />Relevance passed</span></div>}
         {error && <div className="setup-error" role="alert"><PIcon name="error-filled" /> <span>{error}</span></div>}
       </section>
 
