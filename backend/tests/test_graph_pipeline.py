@@ -11,8 +11,8 @@ from unittest.mock import Mock, patch
 from app.agents import graph
 from app.agents.grounding_validator import (
     validate_attacker_citations,
+    validate_citation_critique,
     validate_citation,
-    validate_external_citations,
 )
 from app.agents.schemas import AttackerOutput, DefenderOutput, RefereeOutput
 from app.constants import (
@@ -174,6 +174,39 @@ class StrictSchemaTests(unittest.TestCase):
                 self.assertEqual(urlopen.call_args.kwargs["timeout"], 30.0)
                 sleep.assert_called_once()
 
+    def test_openai_compatible_provider_honors_retry_after_hint(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                content = json.dumps({"ok": True})
+                return json.dumps({
+                    "choices": [{"message": {"content": content}}],
+                }).encode()
+
+        client = GroqClient(api_key="test")
+        transient = urllib.error.HTTPError(
+            client.endpoint,
+            429,
+            "rate limited",
+            {"Retry-After": "4"},
+            io.BytesIO(b'{"error":{"message":"Please try again in 12.2s."}}'),
+        )
+        with (
+            patch(
+                "app.services.llm_client.urllib.request.urlopen",
+                side_effect=[transient, Response()],
+            ),
+            patch("app.services.llm_client.time.sleep") as sleep,
+        ):
+            self.assertEqual(client.generate("system", "user"), {"ok": True})
+
+        sleep.assert_called_once_with(13)
+
 
 class RetrievalAndGroundingTests(unittest.TestCase):
     def test_malformed_and_cross_paper_chunk_ids_are_rejected(self) -> None:
@@ -330,21 +363,52 @@ class RetrievalAndGroundingTests(unittest.TestCase):
             "second supporting passage",
         ])
 
-    def test_external_validation_requires_exact_retrieved_identity(self) -> None:
+    def test_external_validation_requires_a_matching_real_title(self) -> None:
         candidate = {
             "title": "A Robust Baseline for Vision",
+            "abstract": "A robust visual recognition baseline.",
             "authors": ["A. Researcher"],
             "year": 2025,
             "url": "https://example.test/paper",
             "source": "OpenAlex",
         }
-        exact = validate_external_citations([candidate], [candidate])
+        attack = {
+            "critique_type": "missing_baseline",
+            "external_citations": [candidate],
+        }
+        with (
+            patch(
+                "app.agents.grounding_validator.search_external_literature",
+                return_value=[candidate],
+            ),
+            patch(
+                "app.agents.grounding_validator.embed_batch",
+                return_value=[[1.0, 0.0], [1.0, 0.0]],
+            ),
+        ):
+            exact = validate_citation_critique(attack, [], "visual recognition")
         self.assertTrue(exact[0]["valid"])
         self.assertEqual(exact[0]["citation_index"], 0)
 
         substring_hallucination = {**candidate, "title": "Robust Baseline"}
-        invalid = validate_external_citations([substring_hallucination], [candidate])
+        with (
+            patch(
+                "app.agents.grounding_validator.search_external_literature",
+                return_value=[candidate],
+            ),
+            patch("app.agents.grounding_validator.embed_batch") as embed,
+        ):
+            invalid = validate_citation_critique(
+                {
+                    "critique_type": "missing_baseline",
+                    "external_citations": [substring_hallucination],
+                },
+                [],
+                "visual recognition",
+            )
         self.assertFalse(invalid[0]["valid"])
+        self.assertEqual(invalid[0]["reason"], "citation_not_found")
+        embed.assert_not_called()
 
 
 class GraphPipelineTests(unittest.TestCase):
@@ -434,7 +498,7 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertEqual(result["attacker_output"]["external_citations"], [])
         self.assertEqual(result["attacker_output"]["external_candidate_count"], 0)
 
-    def test_external_only_attack_is_accepted_before_defender(self) -> None:
+    def test_verified_missing_baseline_is_accepted_before_defender(self) -> None:
         external = {
             "title": "A Robust Baseline for Vision",
             "authors": ["A. Researcher"],
@@ -449,12 +513,26 @@ class GraphPipelineTests(unittest.TestCase):
                 "critique_text": "The contribution omits comparison with a retrieved prior method.",
                 "cited_chunk_ids": [],
                 "external_citations": [external],
-                "critique_type": "inconsistency",
+                "critique_type": "missing_baseline",
+                "cited_reference_id": None,
             },
             external_search_results=[external],
         )
         with (
             patch("app.agents.graph.validate_attacker_citations", return_value=[]),
+            patch(
+                "app.agents.graph.validate_citation_critique",
+                return_value=[{
+                    "citation_index": 0,
+                    "title": external["title"],
+                    "exists": True,
+                    "relevant": True,
+                    "valid": True,
+                    "similarity_score": 0.91,
+                    "validation_complete": True,
+                    "reason": "verified",
+                }],
+            ),
             patch("app.agents.graph._store_turn", return_value={"agent_type": "attacker"}) as store,
         ):
             result = graph.attacker_validator_node(state)
@@ -492,6 +570,63 @@ class GraphPipelineTests(unittest.TestCase):
             store_verdict.return_value = {"exchange_number": 1, "verdict_type": "ACTIONABLE_FLAW"}
             graph.referee_node(state)
         self.assertEqual(store_verdict.call_args.args[3], "ACTIONABLE_FLAW")
+
+    def test_referee_cannot_silently_accept_failed_integrity_checks(self) -> None:
+        base_state = self._initial_state(
+            attacker_output={
+                "claim_summary": "A paper-owned reference is suspect.",
+                "critique_text": "The reference needs an integrity check.",
+                "cited_chunk_ids": [],
+                "cited_reference_id": "ref-1",
+                "external_citations": [{"title": "Stored Reference"}],
+                "critique_type": "citation_integrity",
+            },
+            defender_output={
+                "rebuttal_text": "The bibliography includes the entry.",
+                "cited_chunk_ids": [CHUNK_ID],
+                "concedes": False,
+            },
+            defender_validation=[{"chunk_id": CHUNK_ID, "valid": True}],
+        )
+        generated_payload = {
+            "verdict": "SOLIDIFIED",
+            "confidence": 0.9,
+            "rationale": "The model attempted to accept the citation.",
+        }
+
+        for reason, expected in (
+            ("citation_not_found", "ACTIONABLE_FLAW"),
+            ("topically_unrelated", "CONTESTED"),
+        ):
+            state = {
+                **base_state,
+                "external_validation": [{
+                    "citation_type": "citation_integrity",
+                    "title": "Stored Reference",
+                    "valid": False,
+                    "reason": reason,
+                }],
+            }
+            with (
+                self.subTest(reason=reason),
+                patch("app.agents.graph.get_llm_client", return_value=Mock()),
+                patch(
+                    "app.agents.graph.generate_structured_with_meta",
+                    return_value=(dict(generated_payload), Mock(), "fake"),
+                ),
+                patch(
+                    "app.agents.graph._store_turn",
+                    return_value={"agent_type": "referee"},
+                ),
+                patch("app.agents.graph._store_verdict") as store_verdict,
+            ):
+                store_verdict.return_value = {
+                    "exchange_number": 1,
+                    "verdict_type": expected,
+                }
+                graph.referee_node(state)
+
+            self.assertEqual(store_verdict.call_args.args[3], expected)
 
     def test_referee_receives_external_validation_and_pins_consistency_provider(self) -> None:
         provider = SequenceLLM([])
@@ -671,6 +806,102 @@ class GraphPipelineTests(unittest.TestCase):
         )
         self.assertFalse(any(event.get("type") in {"complete", "error"} for event in events))
         self.assertEqual(events[-1]["type"], "debrief")
+
+    def test_literature_round_without_references_completes_normally(self) -> None:
+        class NoReferencesLLM(LLMClient):
+            model_name = "no-references-test-provider"
+
+            def generate(self, system_prompt: str, user_prompt: str) -> dict:
+                if "You are the Attacker" in system_prompt:
+                    self.assert_no_integrity_instruction(user_prompt)
+                    return {
+                        "claim_summary": "The selection procedure is not described.",
+                        "critique_text": "The paper omits its sample-selection procedure.",
+                        "cited_chunk_ids": [],
+                        "cited_reference_id": None,
+                        "external_citations": [],
+                        "critique_type": "omission",
+                    }
+                if "You are the Defender" in system_prompt:
+                    return {
+                        "rebuttal_text": "The manuscript does not provide that detail.",
+                        "cited_chunk_ids": [],
+                        "concedes": True,
+                    }
+                if "You are the Referee" in system_prompt:
+                    return {
+                        "verdict": "ACTIONABLE_FLAW",
+                        "confidence": 0.9,
+                        "rationale": "The omission was conceded.",
+                    }
+                return {
+                    "executive_synthesis": "The no-reference paper was fully audited.",
+                    "solidified_strengths": [],
+                    "actionable_weaknesses": ["Document the selection procedure."],
+                    "contested_points": [],
+                }
+
+            @staticmethod
+            def assert_no_integrity_instruction(user_prompt: str) -> None:
+                if "citation_integrity is unavailable" not in user_prompt:
+                    raise AssertionError("no-reference prompt did not disable integrity")
+
+        llm = NoReferencesLLM()
+        stored_verdicts: list[dict] = []
+
+        def store_turn(_round, exchange, agent, sequence, content, _callback):
+            return {
+                "id": f"turn-{sequence}",
+                "exchange_number": exchange,
+                "agent_type": agent,
+                "sequence": sequence,
+                "content": content,
+            }
+
+        def store_verdict(_round, exchange, summary, verdict_type, confidence, rationale, cites, _callback):
+            verdict = {
+                "id": f"verdict-{exchange}",
+                "exchange_number": exchange,
+                "claim_summary": summary,
+                "verdict_type": verdict_type,
+                "confidence": confidence,
+                "rationale": rationale,
+                "cited_chunk_ids": cites,
+            }
+            stored_verdicts.append(verdict)
+            return verdict
+
+        events: list[dict] = []
+        with (
+            patch("app.agents.graph.get_llm_client", return_value=llm),
+            patch("app.agents.graph._load_reference_list", return_value=[]),
+            patch("app.agents.graph.search_external_literature", return_value=[]),
+            patch("app.agents.graph.retrieve_chunks", return_value=[{
+                "id": CHUNK_ID,
+                "paper_id": PAPER_ID,
+                "text": "This research article reports a controlled experiment.",
+                "page_number": 1,
+            }]),
+            patch("app.agents.graph.validate_attacker_citations", return_value=[]),
+            patch("app.agents.graph.validate_citation_critique") as citation_validator,
+            patch("app.agents.graph.validate_defender_citations", return_value=[]),
+            patch("app.agents.graph._store_turn", side_effect=store_turn),
+            patch("app.agents.graph._store_verdict", side_effect=store_verdict),
+            patch("app.agents.graph.get_supabase", return_value=SupabaseStub()),
+        ):
+            compiled = graph.build_audit_graph().compile()
+            with patch("app.agents.graph.get_compiled_graph", return_value=compiled):
+                result = graph.run_audit(
+                    PAPER_ID,
+                    ROUND_ID,
+                    "novelty_scope",
+                    events.append,
+                )
+
+        self.assertEqual(len(result["all_verdicts"]), EXCHANGES_PER_ROUND)
+        self.assertEqual(len(stored_verdicts), EXCHANGES_PER_ROUND)
+        self.assertEqual(events[-1]["type"], "debrief")
+        citation_validator.assert_not_called()
 
     def test_exhausted_attacker_attempts_fail_without_persisting_rejections(self) -> None:
         class InvalidAttackLLM(LLMClient):

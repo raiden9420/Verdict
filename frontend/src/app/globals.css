@@ -1668,6 +1668,7 @@ html[data-theme="dark"] .launch-row {
   color: var(--pds-error-text);
 }
 
+.validation-badge.unavailable,
 .validation-badge.pending {
   border-color: color-mix(in srgb, var(--pds-warning) 45%, transparent);
   background: var(--pds-warning-soft);

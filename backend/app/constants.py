@@ -35,6 +35,10 @@ EMBEDDING_SPACE_ID = f"{EMBEDDING_MODEL_NAME}:{EMBEDDING_DIMENSION}"
 # ---------------------------------------------------------------------------
 GROUNDING_SIMILARITY_THRESHOLD = 0.60  # cosine; below → citation invalid
 LEXICAL_GROUNDING_SIMILARITY_THRESHOLD = 0.45
+# Topical relatedness is broader than claim-to-passage grounding, so it uses a
+# lower threshold. This is deliberately a named calibration point: §21 defines
+# the signal but does not prescribe a model-specific cutoff.
+EXTERNAL_CITATION_RELEVANCE_THRESHOLD = 0.45
 
 # ---------------------------------------------------------------------------
 # Self-consistency check (Phase 2)

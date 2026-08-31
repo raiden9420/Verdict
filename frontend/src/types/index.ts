@@ -127,11 +127,19 @@ export interface ExternalCitation {
   source?: string;
   similarity_score?: number;
   validated?: boolean;
+  reference_id?: string;
 }
 
 export interface ExternalValidationResult {
   title: string;
   valid: boolean;
+  citation_type?: "citation_integrity" | "missing_baseline";
+  reference_id?: string | null;
+  matched_title?: string | null;
+  exists?: boolean;
+  relevant?: boolean;
+  similarity_score?: number | null;
+  validation_complete?: boolean;
   source?: string;
   reason?: string;
   citation_index?: number;
@@ -143,6 +151,7 @@ export interface TurnContent {
   claim_summary?: string;
   critique_text?: string;
   cited_chunk_ids?: string[];
+  cited_reference_id?: string | null;
   critique_type?: string;
   external_citations?: ExternalCitation[];
   external_search_performed?: boolean;

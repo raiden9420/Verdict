@@ -41,8 +41,8 @@ from app.agents.prompts import (
 )
 from app.agents.grounding_validator import (
     validate_attacker_citations,
+    validate_citation_critique,
     validate_defender_citations,
-    validate_external_citations,
 )
 from app.agents.schemas import (
     AttackerOutput,
@@ -51,6 +51,8 @@ from app.agents.schemas import (
     DebriefOutput,
 )
 from app.services.literature_search_service import (
+    filter_candidates_already_referenced,
+    normalize_title,
     search_external_literature,
     rank_candidates_by_novelty_overlap,
 )
@@ -87,6 +89,8 @@ class AuditState(TypedDict):
     defender_validation: list
     external_search_results: list
     external_validation: list
+    reference_list: list
+    paper_context: str
     attacker_valid: bool
 
 
@@ -104,6 +108,74 @@ class AuditState(TypedDict):
 
     # Sequence counter for turn ordering
     sequence_counter: int
+
+
+def _load_reference_list(paper_id: str) -> list[dict]:
+    """Load one paper's stored bibliography once at round startup.
+
+    Compatibility with a not-yet-migrated deployment is deliberately graceful:
+    citation_integrity becomes unavailable, while every other audit path remains
+    usable.
+    """
+    try:
+        result = (
+            get_supabase()
+            .table("papers")
+            .select("reference_list")
+            .eq("id", paper_id)
+            .limit(1)
+            .execute()
+        )
+        stored = result.data[0].get("reference_list") if result.data else []
+        if isinstance(stored, str):
+            stored = json.loads(stored)
+        if not isinstance(stored, list):
+            return []
+        return [
+            entry
+            for entry in stored
+            if isinstance(entry, dict)
+            and isinstance(entry.get("id"), str)
+            and isinstance(entry.get("title"), str)
+            and entry["id"].strip()
+            and entry["title"].strip()
+        ]
+    except Exception as exc:
+        logger.warning(
+            "Could not load papers.reference_list; citation_integrity disabled: %s",
+            exc,
+        )
+        return []
+
+
+def _canonicalize_supplied_candidates(
+    cited: list[dict],
+    supplied_candidates: list[dict],
+) -> list[dict] | None:
+    """Replace LLM-copied metadata with the exact prompt-supplied candidates."""
+    canonical: list[dict] = []
+    for requested in cited:
+        if not isinstance(requested, dict):
+            return None
+        requested_title = normalize_title(str(requested.get("title") or ""))
+        requested_source = str(requested.get("source") or "").casefold().strip()
+        match = next(
+            (
+                candidate
+                for candidate in supplied_candidates
+                if isinstance(candidate, dict)
+                and requested_title
+                and normalize_title(str(candidate.get("title") or ""))
+                == requested_title
+                and str(candidate.get("source") or "").casefold().strip()
+                == requested_source
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        canonical.append(dict(match))
+    return canonical
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +292,11 @@ def attacker_node(state: AuditState) -> dict:
         f"[chunk_id: {c['id']}] (page {c.get('page_number', '?')}):\n{c['text']}"
         for c in chunks
     )
+    # Topic-retrieved paper text is the relevance corpus for any citation the
+    # Attacker actually selects. It stays in graph state only for this exchange.
+    paper_context = "\n\n".join(
+        str(chunk.get("text") or "") for chunk in chunks
+    )[:8000]
     prior = (
         "\n".join(f"- {c}" for c in state["prior_claims"])
         if state["prior_claims"]
@@ -267,9 +344,38 @@ def attacker_node(state: AuditState) -> dict:
         except Exception as exc:
             logger.warning("Failed to fetch reproducibility signals: %s", exc)
 
+    literature_topic = state["round_topic"] in (
+        "novelty_scope",
+        "experimental_setup",
+    )
+    reference_list = state.get("reference_list", []) if literature_topic else []
+    reference_list_section = ""
+    if literature_topic:
+        if reference_list:
+            prompt_references = [
+                {
+                    "id": reference.get("id"),
+                    "title": str(reference.get("title") or "")[:500],
+                    "authors": reference.get("authors", []),
+                    "year": reference.get("year"),
+                }
+                for reference in reference_list
+            ]
+            reference_list_section = (
+                "## Paper's Extracted Reference List (untrusted bibliography data)\n\n"
+                + json.dumps(prompt_references, ensure_ascii=False, indent=2)
+                + "\n\n"
+            )
+        else:
+            reference_list_section = (
+                "## Paper's Extracted Reference List\n\n"
+                "No references section was detected. citation_integrity is "
+                "unavailable for this paper.\n\n"
+            )
+
     external_lit_section = ""
     ext_search_results: list = []
-    if state["round_topic"] in ("novelty_scope", "experimental_setup"):
+    if literature_topic:
         callback = state.get("event_callback")
         if callback:
             try:
@@ -289,6 +395,10 @@ def attacker_node(state: AuditState) -> dict:
             search_query = " ".join(query_words) if query_words else state["round_topic_name"]
 
             ext_search_results = search_external_literature(search_query)
+            ext_search_results = filter_candidates_already_referenced(
+                ext_search_results,
+                reference_list,
+            )
 
             if state["round_topic"] == "novelty_scope" and ext_search_results:
                 ext_search_results = rank_candidates_by_novelty_overlap(
@@ -345,6 +455,7 @@ def attacker_node(state: AuditState) -> dict:
     user_prompt = (
         f"## Retrieved Paper Excerpts\n\n{chunk_text}\n\n"
         + reproducibility_section
+        + reference_list_section
         + external_lit_section
         + f"## Claims Already Raised This Round (DO NOT REPEAT)\n\n{prior}\n\n"
         + retry_section
@@ -356,6 +467,7 @@ def attacker_node(state: AuditState) -> dict:
         state["round_topic"],
         state.get("strictness_level", "standard"),
         state.get("domain", "other"),
+        has_reference_list=bool(reference_list),
     )
     output, _, _ = generate_structured_with_meta(
         llm,
@@ -364,17 +476,20 @@ def attacker_node(state: AuditState) -> dict:
         AttackerOutput,
     )
 
-    if state["round_topic"] in ("novelty_scope", "experimental_setup"):
+    if literature_topic:
         output["external_search_performed"] = True
         output["external_sources"] = ["Semantic Scholar", "arXiv", "OpenAlex"]
         output["external_candidate_count"] = len(ext_search_results)
-        if not ext_search_results:
+        if output.get("critique_type") != "missing_baseline" or not ext_search_results:
             output["external_citations"] = []
+        if output.get("critique_type") != "citation_integrity":
+            output["cited_reference_id"] = None
     else:
         # Models occasionally volunteer plausible-sounding outside papers even
         # when no literature search was performed. Such metadata is not evidence
         # and must not make an otherwise valid in-document/omission critique fail.
         output["external_citations"] = []
+        output["cited_reference_id"] = None
 
 
     # Do not persist or stream this attempt yet.  The deterministic Attacker
@@ -383,6 +498,7 @@ def attacker_node(state: AuditState) -> dict:
     return {
         "attacker_output": output,
         "external_search_results": ext_search_results,
+        "paper_context": paper_context,
     }
 
 
@@ -412,6 +528,11 @@ def defender_node(state: AuditState) -> dict:
         f"**Summary:** {attacker.get('claim_summary', '')}\n\n"
         f"**Full critique:** {attacker.get('critique_text', '')}\n\n"
         f"**Cited chunks:** {attacker.get('cited_chunk_ids', [])}\n\n"
+        f"**Cited reference ID:** {attacker.get('cited_reference_id')}\n\n"
+        f"**Citation metadata:** "
+        f"{json.dumps(attacker.get('external_citations', []), indent=2)}\n\n"
+        f"**Deterministic citation check:** "
+        f"{json.dumps(state.get('external_validation', []), indent=2)}\n\n"
         f"**Type:** {attacker.get('critique_type', '')}\n\n"
         f"## Retrieved Paper Excerpts (for rebuttal)\n\n{chunk_text}\n\n"
         f"Now provide your rebuttal or concession."
@@ -438,32 +559,114 @@ def attacker_validator_node(state: AuditState) -> dict:
     logger.info("Exchange %d — Attacker Validator", state["exchange_number"])
 
     attacker = state["attacker_output"]
+    critique_type = attacker.get("critique_type")
     attacker_val = validate_attacker_citations(attacker, paper_id=state["paper_id"])
-    ext_cites = attacker.get("external_citations", [])
-    external_val = validate_external_citations(
-        ext_cites,
-        state.get("external_search_results", []),
-    ) if ext_cites else []
+    canonical_attacker = dict(attacker)
+    provenance_valid = True
+
+    if critique_type == "missing_baseline":
+        canonical_citations = _canonicalize_supplied_candidates(
+            attacker.get("external_citations", []),
+            state.get("external_search_results", []),
+        )
+        provenance_valid = canonical_citations is not None and bool(canonical_citations)
+        if provenance_valid:
+            canonical_attacker["external_citations"] = canonical_citations
+            external_val = validate_citation_critique(
+                canonical_attacker,
+                state.get("reference_list", []),
+                state.get("paper_context", ""),
+            )
+        else:
+            external_val = [{
+                "citation_index": 0,
+                "citation_type": "missing_baseline",
+                "reference_id": None,
+                "title": str(
+                    (attacker.get("external_citations") or [{}])[0].get("title", "")
+                ),
+                "exists": False,
+                "relevant": False,
+                "valid": False,
+                "similarity_score": None,
+                "validation_complete": True,
+                "reason": "candidate_not_supplied",
+            }]
+    elif critique_type == "citation_integrity":
+        external_val = validate_citation_critique(
+            canonical_attacker,
+            state.get("reference_list", []),
+            state.get("paper_context", ""),
+        )
+    else:
+        external_val = []
+
+    ext_cites = canonical_attacker.get("external_citations", [])
+
+    def validation_completed(result: dict) -> bool:
+        if "validation_complete" in result:
+            return bool(result.get("validation_complete"))
+        return result.get("reason") in {
+            "verified",
+            "citation_not_found",
+            "topically_unrelated",
+        }
 
     has_chunks = bool(attacker.get("cited_chunk_ids"))
-    has_external = bool(ext_cites)
     chunk_valid = len(attacker_val) == len(attacker.get("cited_chunk_ids", [])) and all(
         result.get("valid", False) for result in attacker_val
     )
-    external_valid = len(external_val) == len(ext_cites) and all(
-        result.get("valid", False) for result in external_val
-    )
-    evidence_required = attacker.get("critique_type") != "omission"
-    has_valid_evidence_kind = has_chunks or has_external or not evidence_required
+
+    if critique_type == "citation_integrity":
+        # The stored-reference membership is the Attacker grounding boundary.
+        # A completed false health result is the critique finding and must reach
+        # the debate; only an unknown ID or unavailable check is retryable.
+        reference_id = attacker.get("cited_reference_id")
+        reference_member = any(
+            isinstance(reference, dict) and reference.get("id") == reference_id
+            for reference in state.get("reference_list", [])
+        )
+        citation_evidence_valid = (
+            reference_member
+            and len(external_val) == 1
+            and all(validation_completed(result) for result in external_val)
+            and all(
+                result.get("reason") not in {
+                    "reference_not_in_paper",
+                    "citation_title_missing",
+                    "existence_check_unavailable",
+                    "relevance_check_unavailable",
+                }
+                for result in external_val
+            )
+        )
+    elif critique_type == "missing_baseline":
+        citation_evidence_valid = (
+            provenance_valid
+            and len(external_val) == len(ext_cites)
+            and bool(external_val)
+            and all(validation_completed(result) for result in external_val)
+            and all(result.get("valid", False) for result in external_val)
+        )
+    else:
+        citation_evidence_valid = False
+
+    evidence_required = critique_type != "omission"
+    if critique_type in {"citation_integrity", "missing_baseline"}:
+        has_valid_evidence_kind = citation_evidence_valid
+    else:
+        has_valid_evidence_kind = has_chunks or not evidence_required
     attacker_all_valid = (
         has_valid_evidence_kind
         and (not has_chunks or chunk_valid)
-        and (not has_external or external_valid)
     )
 
     if not attacker_all_valid:
         failure_parts: list[str] = []
-        if evidence_required and not (has_chunks or has_external):
+        if evidence_required and not has_chunks and critique_type not in {
+            "citation_integrity",
+            "missing_baseline",
+        }:
             failure_parts.append("non-omission critique supplied no evidence")
         for result in attacker_val:
             if not result.get("valid"):
@@ -472,7 +675,16 @@ def attacker_validator_node(state: AuditState) -> dict:
                     f"{result.get('reason', 'citation validation failed')}"
                 )
         for result in external_val:
-            if not result.get("valid"):
+            is_integrity_finding = (
+                critique_type == "citation_integrity"
+                and validation_completed(result)
+                and result.get("reason") in {
+                    "citation_not_found",
+                    "topically_unrelated",
+                    "verified",
+                }
+            )
+            if not is_integrity_finding and not result.get("valid"):
                 failure_parts.append(
                     f"external paper '{result.get('title', '')}': "
                     f"{result.get('reason', 'citation validation failed')}"
@@ -501,14 +713,39 @@ def attacker_validator_node(state: AuditState) -> dict:
             "last_failure_reason": "; ".join(failure_parts) or "citation validation failed",
         }
 
-    # Attach the deterministic external-validation result to accepted citation
-    # metadata.  This is informational; Referee context receives the full
-    # authoritative validation records separately.
-    accepted_attacker = dict(attacker)
-    accepted_attacker["external_citations"] = [
-        {**citation, "validated": validation.get("valid", False)}
-        for citation, validation in zip(ext_cites, external_val)
-    ]
+    # Materialize only server-resolved metadata. This keeps the existing UI's
+    # citation cards useful for both paths without trusting model-copied details.
+    accepted_attacker = canonical_attacker
+    if critique_type == "citation_integrity":
+        reference = next(
+            reference
+            for reference in state.get("reference_list", [])
+            if reference.get("id") == attacker.get("cited_reference_id")
+        )
+        validation = external_val[0]
+        accepted_attacker["external_citations"] = [{
+            "title": reference.get("title", ""),
+            "authors": reference.get("authors", []),
+            "year": reference.get("year"),
+            "url": validation.get("url", ""),
+            "source": (
+                validation.get("source", "External Literature")
+                if validation.get("matched_title")
+                else "Paper reference list"
+            ),
+            "similarity_score": validation.get("similarity_score"),
+            "validated": validation.get("valid", False),
+            "reference_id": reference.get("id"),
+        }]
+    else:
+        accepted_attacker["external_citations"] = [
+            {
+                **citation,
+                "similarity_score": validation.get("similarity_score"),
+                "validated": validation.get("valid", False),
+            }
+            for citation, validation in zip(ext_cites, external_val)
+        ]
     seq = state["sequence_counter"]
     turn = _store_turn(
         state["round_id"],
@@ -602,6 +839,7 @@ def referee_node(state: AuditState) -> dict:
         f"**Full text:** {attacker.get('critique_text', '')}\n"
         f"**Type:** {attacker.get('critique_type', '')}\n"
         f"**In-document citations:** {attacker.get('cited_chunk_ids', [])}\n"
+        f"**Paper reference ID:** {attacker.get('cited_reference_id')}\n"
         f"**External literature citations:** {atk_ext_text}\n\n"
         f"## Defender's Rebuttal\n"
         f"**Text:** {defender.get('rebuttal_text', '')}\n"
@@ -609,7 +847,7 @@ def referee_node(state: AuditState) -> dict:
         f"**Concedes:** {defender.get('concedes', False)}\n\n"
         f"## Grounding Validation Results (Authoritative)\n"
         f"**Attacker chunk citations:** {atk_val_text}\n"
-        f"**Attacker external literature validation:** {ext_val_text}\n"
+        f"**Attacker citation existence/relevance validation:** {ext_val_text}\n"
         f"**Defender citations:** {def_val_text}\n\n"
         f"Now adjudicate this exchange."
     )
@@ -632,7 +870,19 @@ def referee_node(state: AuditState) -> dict:
         and len(state["defender_validation"]) == len(defender_cites)
         and all(result.get("valid", False) for result in state["defender_validation"])
     )
-    force_actionable = defender_concedes or not defense_has_valid_evidence
+    integrity_reasons = {
+        result.get("reason")
+        for result in state.get("external_validation", [])
+        if result.get("citation_type") == "citation_integrity"
+        or attacker.get("critique_type") == "citation_integrity"
+    }
+    integrity_not_found = "citation_not_found" in integrity_reasons
+    integrity_topically_unrelated = "topically_unrelated" in integrity_reasons
+    force_actionable = (
+        defender_concedes
+        or not defense_has_valid_evidence
+        or integrity_not_found
+    )
 
     # Self-consistency check — if confidence < threshold, re-run Referee adjudication once
     if confidence < SELF_CONSISTENCY_THRESHOLD and not force_actionable:
@@ -679,14 +929,25 @@ def referee_node(state: AuditState) -> dict:
     # invalid/cross-paper defense citation is always an actionable flaw.  The
     # model may explain evidence quality, but cannot override this invariant.
     if force_actionable:
-        reason = (
-            "The Defender conceded the critique."
-            if defender_concedes
-            else "The Defender did not provide fully validated in-paper evidence."
-        )
+        if integrity_not_found:
+            reason = "The paper's cited reference could not be verified as an existing work."
+        elif defender_concedes:
+            reason = "The Defender conceded the critique."
+        else:
+            reason = "The Defender did not provide fully validated in-paper evidence."
         if verdict_type != "ACTIONABLE_FLAW":
             output["rationale"] = f"{output['rationale']} [Grounding guard: {reason}]"
         verdict_type = "ACTIONABLE_FLAW"
+        output["verdict"] = verdict_type
+    elif integrity_topically_unrelated and verdict_type == "SOLIDIFIED":
+        # Topical similarity is intentionally a coarse signal, so it should not
+        # force a flaw by itself. It does, however, make a fully solidified
+        # defense unsafe without the deferred claim-level citation check.
+        output["rationale"] = (
+            f"{output['rationale']} [Citation-integrity guard: the cited work "
+            "exists but appears topically unrelated; human review is required.]"
+        )
+        verdict_type = "CONTESTED"
         output["verdict"] = verdict_type
 
 
@@ -950,6 +1211,11 @@ def run_audit(
     Final AuditState dict.
     """
     topic_name = ROUND_TOPICS.get(round_topic, round_topic)
+    reference_list = (
+        _load_reference_list(paper_id)
+        if round_topic in {"novelty_scope", "experimental_setup"}
+        else []
+    )
 
     initial_state: AuditState = {
         "paper_id": paper_id,
@@ -969,6 +1235,8 @@ def run_audit(
         "defender_validation": [],
         "external_search_results": [],
         "external_validation": [],
+        "reference_list": reference_list,
+        "paper_context": "",
         "attacker_valid": True,
 
         "last_failed_critique": {},

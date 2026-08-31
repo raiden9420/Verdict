@@ -80,7 +80,8 @@ The backend uses two deliberately separate Supabase credentials:
 - Node.js 20+
 - A Supabase project with Auth, Postgres, Storage, and pgvector
 - A Gemini API key
-- Optional Groq and OpenRouter keys for provider fallback
+- A Groq API key for bibliography extraction (and provider fallback)
+- An optional OpenRouter key for provider fallback
 
 ## 1. Supabase setup
 
@@ -122,8 +123,10 @@ SUPABASE_ANON_KEY=your-browser-safe-publishable-key
 SUPABASE_SERVICE_ROLE_KEY=your-backend-only-secret-key
 FRONTEND_ORIGINS=http://localhost:3000
 
-# Optional Phase 2 fallbacks/integrations
+# Bibliography extraction and optional LLM fallback
 GROQ_API_KEY=
+
+# Optional Phase 2 fallback/integrations
 OPENROUTER_API_KEY=
 OPENALEX_MAILTO=
 ```
@@ -185,6 +188,20 @@ URLs.
 
 Fast is the default. Exhaustive can run six topics and substantially increases
 LLM calls, elapsed time, and the likelihood of exhausting free-tier quota.
+
+### Citation critiques
+
+For `novelty_scope` and `experimental_setup`, `citation_integrity` critiques
+select a specific entry from the paper's extracted reference list and check that
+the cited work exists and is topically relevant. `missing_baseline` critiques
+instead search for relevant uncited prior art, exclude fuzzy title matches
+already present in the extracted reference list, and apply the same existence
+and relevance checks to the remaining candidate.
+
+Reference extraction runs once during upload. If no references section is
+detected, the upload and audit still proceed normally: `reference_list` is
+empty, `citation_integrity` is unavailable, and `missing_baseline` remains
+available without bibliography filtering.
 
 ### Final report and Markdown export
 
@@ -320,10 +337,8 @@ request and push to `main`.
 
 ## Deliberately deferred
 
-- External reference-list extraction/citation overhaul
 - PDF report export (Markdown is the required export for this phase)
 - Public calibration/benchmark page
 - Institutional API
 
-Those items remain Phase 4 or later scope; the existing external-literature
-existence validation remains unchanged.
+The remaining items are outside the current implementation scope.

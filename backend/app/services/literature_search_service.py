@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.config import OPENALEX_MAILTO
@@ -28,11 +29,82 @@ ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 # In-process cache: query -> list of paper dicts
 _SEARCH_CACHE: dict[str, list[dict]] = {}
+_SEARCH_STATUS_CACHE: dict[str, int] = {}
+LITERATURE_SOURCE_COUNT = 3
+
+# High enough to tolerate punctuation and small extraction/provider differences
+# without treating merely related titles as the same cited work.
+FUZZY_TITLE_MATCH_THRESHOLD = 0.90
 
 
 def normalize_title(title: str) -> str:
     """Normalize paper title for deduplication."""
     return re.sub(r"[^a-z0-9]", "", title.lower())
+
+
+def titles_fuzzy_match(
+    left_title: object,
+    right_title: object,
+    threshold: float = FUZZY_TITLE_MATCH_THRESHOLD,
+) -> bool:
+    """Return whether two non-empty titles identify the same likely work.
+
+    Normalization handles harmless casing, whitespace, and punctuation drift;
+    ``SequenceMatcher`` then tolerates small OCR or provider spelling differences.
+    Empty/non-string values never match, preventing malformed metadata from
+    filtering a legitimate search result.
+    """
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("title-match threshold must be between 0.0 and 1.0")
+    if not isinstance(left_title, str) or not isinstance(right_title, str):
+        return False
+
+    left = normalize_title(left_title)
+    right = normalize_title(right_title)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return SequenceMatcher(None, left, right).ratio() >= threshold
+
+
+def filter_candidates_already_referenced(
+    candidates: list[dict],
+    reference_list: list[dict],
+) -> list[dict]:
+    """Exclude literature candidates already present in the paper bibliography.
+
+    The input collections are never mutated and candidate order is preserved so
+    downstream novelty ranking and prompt formatting remain deterministic.
+    """
+    reference_titles = [
+        entry.get("title")
+        for entry in reference_list
+        if isinstance(entry, dict)
+        and isinstance(entry.get("title"), str)
+        and entry["title"].strip()
+    ]
+    if not reference_titles:
+        return list(candidates)
+
+    filtered = [
+        candidate
+        for candidate in candidates
+        if not (
+            isinstance(candidate, dict)
+            and any(
+                titles_fuzzy_match(candidate.get("title"), reference_title)
+                for reference_title in reference_titles
+            )
+        )
+    ]
+    removed_count = len(candidates) - len(filtered)
+    if removed_count:
+        logger.info(
+            "Filtered %d external candidate(s) already present in the reference list",
+            removed_count,
+        )
+    return filtered
 
 
 def _reconstruct_openalex_abstract(inverted_index: dict | None) -> str:
@@ -50,7 +122,12 @@ def _reconstruct_openalex_abstract(inverted_index: dict | None) -> str:
     return " ".join(words).strip()
 
 
-def search_semantic_scholar(query: str, limit: int = 5) -> list[dict]:
+def search_semantic_scholar(
+    query: str,
+    limit: int = 5,
+    *,
+    raise_on_error: bool = False,
+) -> list[dict]:
     """Search Semantic Scholar Graph API."""
     try:
         encoded_query = urllib.parse.quote(query)
@@ -74,11 +151,18 @@ def search_semantic_scholar(query: str, limit: int = 5) -> list[dict]:
                 })
             return results
     except Exception as exc:
+        if raise_on_error:
+            raise
         logger.warning("Semantic Scholar search failed: %s", exc)
         return []
 
 
-def search_arxiv(query: str, limit: int = 5) -> list[dict]:
+def search_arxiv(
+    query: str,
+    limit: int = 5,
+    *,
+    raise_on_error: bool = False,
+) -> list[dict]:
     """Search arXiv API."""
     try:
         encoded_query = urllib.parse.quote(query)
@@ -123,11 +207,18 @@ def search_arxiv(query: str, limit: int = 5) -> list[dict]:
                     })
             return results
     except Exception as exc:
+        if raise_on_error:
+            raise
         logger.warning("arXiv search failed: %s", exc)
         return []
 
 
-def search_openalex(query: str, limit: int = 5) -> list[dict]:
+def search_openalex(
+    query: str,
+    limit: int = 5,
+    *,
+    raise_on_error: bool = False,
+) -> list[dict]:
     """Search OpenAlex API."""
     try:
         encoded_query = urllib.parse.quote(query)
@@ -161,11 +252,18 @@ def search_openalex(query: str, limit: int = 5) -> list[dict]:
                 })
             return results
     except Exception as exc:
+        if raise_on_error:
+            raise
         logger.warning("OpenAlex search failed: %s", exc)
         return []
 
 
-def search_external_literature(query: str, limit_per_source: int = 5) -> list[dict]:
+def search_external_literature(
+    query: str,
+    limit_per_source: int = 5,
+    *,
+    with_status: bool = False,
+) -> list[dict] | tuple[list[dict], int]:
     """
     Search Semantic Scholar, arXiv, and OpenAlex in parallel.
     Deduplicate by normalized title and cache in-process.
@@ -173,21 +271,41 @@ def search_external_literature(query: str, limit_per_source: int = 5) -> list[di
     normalized_q = query.strip().lower()
     if normalized_q in _SEARCH_CACHE:
         logger.info("Returning cached external search results for: '%s'", query)
-        return _SEARCH_CACHE[normalized_q]
+        cached = _SEARCH_CACHE[normalized_q]
+        if with_status:
+            return cached, _SEARCH_STATUS_CACHE.get(normalized_q, 0)
+        return cached
 
     logger.info("Searching external literature across APIs for: '%s'", query)
     all_results: list[dict] = []
+    successful_sources = 0
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=LITERATURE_SOURCE_COUNT) as executor:
         futures = {
-            executor.submit(search_semantic_scholar, query, limit_per_source): "Semantic Scholar",
-            executor.submit(search_arxiv, query, limit_per_source): "arXiv",
-            executor.submit(search_openalex, query, limit_per_source): "OpenAlex",
+            executor.submit(
+                search_semantic_scholar,
+                query,
+                limit_per_source,
+                raise_on_error=True,
+            ): "Semantic Scholar",
+            executor.submit(
+                search_arxiv,
+                query,
+                limit_per_source,
+                raise_on_error=True,
+            ): "arXiv",
+            executor.submit(
+                search_openalex,
+                query,
+                limit_per_source,
+                raise_on_error=True,
+            ): "OpenAlex",
         }
         for future in as_completed(futures):
             source_name = futures[future]
             try:
                 res = future.result()
+                successful_sources += 1
                 all_results.extend(res)
             except Exception as exc:
                 logger.warning("Error fetching literature from %s: %s", source_name, exc)
@@ -201,7 +319,15 @@ def search_external_literature(query: str, limit_per_source: int = 5) -> list[di
             seen_titles.add(norm)
             deduped.append(item)
 
-    _SEARCH_CACHE[normalized_q] = deduped
+    # A partial provider sweep is useful for the current request, especially
+    # when it contains a positive title match, but must not become a permanent
+    # cached false negative after a transient outage. Cache only complete
+    # sweeps so later calls can retry every source.
+    if successful_sources == LITERATURE_SOURCE_COUNT:
+        _SEARCH_CACHE[normalized_q] = deduped
+        _SEARCH_STATUS_CACHE[normalized_q] = successful_sources
+    if with_status:
+        return deduped, successful_sources
     return deduped
 
 

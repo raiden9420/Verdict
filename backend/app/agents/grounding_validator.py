@@ -12,10 +12,16 @@ check. Non-conceding Defenders must provide valid paper-local evidence.
 
 import logging
 from app.constants import (
+    EXTERNAL_CITATION_RELEVANCE_THRESHOLD,
     GROUNDING_SIMILARITY_THRESHOLD,
     LEXICAL_GROUNDING_SIMILARITY_THRESHOLD,
 )
 from app.services.embedding_service import embed_batch, cosine_similarity
+from app.services.literature_search_service import (
+    LITERATURE_SOURCE_COUNT,
+    search_external_literature,
+    titles_fuzzy_match,
+)
 from app.services.retrieval_service import get_chunk_by_id, lexical_similarity
 
 logger = logging.getLogger(__name__)
@@ -128,8 +134,15 @@ def validate_attacker_citations(
     If critique_type is 'omission', skip — there's nothing to validate.
     Returns a list of validation results (one per cited chunk).
     """
-    if attacker_output.get("critique_type") == "omission":
-        logger.info("Attacker critique is an omission — skipping validation")
+    if attacker_output.get("critique_type") in {
+        "omission",
+        "citation_integrity",
+        "missing_baseline",
+    }:
+        logger.info(
+            "Attacker critique type %s does not require an in-document citation",
+            attacker_output.get("critique_type"),
+        )
         return []
 
     chunk_ids = attacker_output.get("cited_chunk_ids", [])
@@ -193,82 +206,262 @@ def validate_defender_citations(
     return _validate_citation_batch(chunk_ids, claim, paper_id=paper_id)
 
 
-def validate_external_citations(
-    external_citations: list[dict],
-    search_results: list[dict],
+def _citation_result(
+    *,
+    citation_index: int,
+    citation_type: str,
+    title: str,
+    reference_id: str | None = None,
+    exists: bool = False,
+    relevant: bool = False,
+    valid: bool = False,
+    reason: str,
+    validation_complete: bool = True,
+    similarity_score: float | None = None,
+    matched_work: dict | None = None,
+) -> dict:
+    """Build the stable result shape shared by both citation critique types."""
+    matched = matched_work or {}
+    return {
+        "citation_index": citation_index,
+        "citation_type": citation_type,
+        "reference_id": reference_id,
+        "title": title,
+        "matched_title": matched.get("title"),
+        "exists": exists,
+        "relevant": relevant,
+        "valid": valid,
+        "similarity_score": (
+            round(similarity_score, 4)
+            if isinstance(similarity_score, (int, float))
+            else None
+        ),
+        "source": matched.get("source", "External Literature"),
+        "url": matched.get("url", ""),
+        "validation_method": "title_search_and_embedding_similarity",
+        "validation_complete": validation_complete,
+        "reason": reason,
+    }
+
+
+def validate_citation_critique(
+    attacker_output: dict,
+    reference_list: list[dict],
+    paper_context: str,
 ) -> list[dict]:
-    """
-    Validate external literature citations by checking existence in search_results.
+    """Run one lazy existence-and-relevance validator for both citation paths.
 
-    Parameters
-    ----------
-    external_citations : list of dicts from Attacker turn, e.g. [{"title": "...", "authors": [...]}]
-    search_results : list of dicts returned by search_external_literature()
+    ``citation_integrity`` metadata is resolved only from ``reference_list``;
+    model-authored metadata is never trusted. ``missing_baseline`` is expected to
+    have been replaced with canonical, prompt-supplied candidates by the graph's
+    provenance boundary before it reaches this function.
 
-    Returns
-    -------
-    list of dicts with keys: title, valid, source
+    A false ``valid`` result means the cited work is suspect. Graph routing then
+    treats that result differently by critique type: it is the finding for an
+    integrity critique, but invalid evidence for a missing-baseline critique.
     """
-    import re
-    if not external_citations:
+    critique_type = str(attacker_output.get("critique_type") or "")
+    canonical_citations: list[dict] = []
+
+    if critique_type == "citation_integrity":
+        reference_id = attacker_output.get("cited_reference_id")
+        reference = next(
+            (
+                entry
+                for entry in reference_list
+                if isinstance(entry, dict) and entry.get("id") == reference_id
+            ),
+            None,
+        )
+        if reference is None:
+            return [
+                _citation_result(
+                    citation_index=0,
+                    citation_type=critique_type,
+                    reference_id=(str(reference_id) if reference_id is not None else None),
+                    title="",
+                    reason="reference_not_in_paper",
+                )
+            ]
+        canonical_citations = [
+            {
+                "title": reference.get("title", ""),
+                "authors": reference.get("authors", []),
+                "year": reference.get("year"),
+                "reference_id": str(reference.get("id")),
+            }
+        ]
+    elif critique_type == "missing_baseline":
+        canonical_citations = [
+            dict(citation)
+            for citation in attacker_output.get("external_citations", [])
+            if isinstance(citation, dict)
+        ]
+        if not canonical_citations:
+            return [
+                _citation_result(
+                    citation_index=0,
+                    citation_type=critique_type,
+                    title="",
+                    reason="missing_baseline_citation_missing",
+                )
+            ]
+    else:
         return []
 
-    def normalize(value: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", str(value).lower())
+    matched: list[tuple[int, dict, dict]] = []
+    results_by_index: dict[int, dict] = {}
+    for citation_index, citation in enumerate(canonical_citations):
+        title = str(citation.get("title") or "").strip()
+        reference_id = citation.get("reference_id")
+        if not title:
+            results_by_index[citation_index] = _citation_result(
+                citation_index=citation_index,
+                citation_type=critique_type,
+                reference_id=reference_id,
+                title="",
+                reason="citation_title_missing",
+                validation_complete=False,
+            )
+            continue
 
-    candidates_by_title: dict[str, list[dict]] = {}
-    for paper in search_results:
-        normalized = normalize(paper.get("title", ""))
-        if normalized:
-            candidates_by_title.setdefault(normalized, []).append(paper)
+        try:
+            search_response = search_external_literature(title, with_status=True)
+        except Exception as exc:
+            logger.warning(
+                "External citation existence validation unavailable for '%s': %s",
+                title,
+                exc,
+            )
+            results_by_index[citation_index] = _citation_result(
+                citation_index=citation_index,
+                citation_type=critique_type,
+                reference_id=reference_id,
+                title=title,
+                reason="existence_check_unavailable",
+                validation_complete=False,
+            )
+            continue
+        if (
+            isinstance(search_response, tuple)
+            and len(search_response) == 2
+        ):
+            search_results, successful_sources = search_response
+        else:
+            # Test doubles and older compatible implementations may still
+            # return only the result list. Without explicit partial status, a
+            # completed aggregate call retains the legacy conclusive semantics.
+            search_results = search_response
+            successful_sources = LITERATURE_SOURCE_COUNT
+        real_match = next(
+            (
+                candidate
+                for candidate in search_results
+                if isinstance(candidate, dict)
+                and titles_fuzzy_match(title, candidate.get("title"))
+            ),
+            None,
+        )
+        if real_match is None:
+            # A positive identity match is conclusive even when only one source
+            # answered. A negative is conclusive only after every configured
+            # source completed; otherwise the missing provider may contain the
+            # work (for example, a journal article absent from arXiv).
+            if successful_sources < LITERATURE_SOURCE_COUNT:
+                results_by_index[citation_index] = _citation_result(
+                    citation_index=citation_index,
+                    citation_type=critique_type,
+                    reference_id=reference_id,
+                    title=title,
+                    reason="existence_check_unavailable",
+                    validation_complete=False,
+                )
+                continue
+            results_by_index[citation_index] = _citation_result(
+                citation_index=citation_index,
+                citation_type=critique_type,
+                reference_id=reference_id,
+                title=title,
+                reason="citation_not_found",
+            )
+            continue
+        matched.append((citation_index, citation, real_match))
 
-    results = []
-    for citation_index, cite in enumerate(external_citations):
-        cite_title = cite.get("title", "")
-        norm_title = normalize(cite_title)
-        matching_candidates = candidates_by_title.get(norm_title, [])
-        matched_candidate = None
-        failure_reason = "title_not_in_search_results"
+    if matched:
+        context = str(paper_context or "").strip()
+        if not context:
+            for citation_index, citation, real_match in matched:
+                results_by_index[citation_index] = _citation_result(
+                    citation_index=citation_index,
+                    citation_type=critique_type,
+                    reference_id=citation.get("reference_id"),
+                    title=str(citation.get("title") or ""),
+                    exists=True,
+                    reason="relevance_check_unavailable",
+                    validation_complete=False,
+                    matched_work=real_match,
+                )
+        else:
+            work_texts = [
+                " ".join(
+                    part
+                    for part in (
+                        str(real_match.get("title") or "").strip(),
+                        str(real_match.get("abstract") or "").strip(),
+                    )
+                    if part
+                )[:4000]
+                for _, _, real_match in matched
+            ]
+            try:
+                vectors = embed_batch([context[:8000], *work_texts])
+                context_vector = vectors[0]
+                similarities = [
+                    cosine_similarity(context_vector, work_vector)
+                    for work_vector in vectors[1:]
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "External citation relevance validation unavailable: %s",
+                    exc,
+                )
+                similarities = []
 
-        for candidate in matching_candidates:
-            source_matches = normalize(candidate.get("source", "")) == normalize(cite.get("source", ""))
-            candidate_year = candidate.get("year")
-            year_matches = candidate_year is None or cite.get("year") == candidate_year
+            for matched_index, (citation_index, citation, real_match) in enumerate(matched):
+                if matched_index >= len(similarities):
+                    results_by_index[citation_index] = _citation_result(
+                        citation_index=citation_index,
+                        citation_type=critique_type,
+                        reference_id=citation.get("reference_id"),
+                        title=str(citation.get("title") or ""),
+                        exists=True,
+                        reason="relevance_check_unavailable",
+                        validation_complete=False,
+                        matched_work=real_match,
+                    )
+                    continue
 
-            candidate_authors = {
-                normalize(author) for author in candidate.get("authors", []) if normalize(author)
-            }
-            cited_authors = {
-                normalize(author) for author in cite.get("authors", []) if normalize(author)
-            }
-            authors_match = not candidate_authors or bool(candidate_authors & cited_authors)
+                similarity = similarities[matched_index]
+                relevant = similarity >= EXTERNAL_CITATION_RELEVANCE_THRESHOLD
+                results_by_index[citation_index] = _citation_result(
+                    citation_index=citation_index,
+                    citation_type=critique_type,
+                    reference_id=citation.get("reference_id"),
+                    title=str(citation.get("title") or ""),
+                    exists=True,
+                    relevant=relevant,
+                    valid=relevant,
+                    reason="verified" if relevant else "topically_unrelated",
+                    similarity_score=similarity,
+                    matched_work=real_match,
+                )
 
-            candidate_url = str(candidate.get("url") or "").rstrip("/")
-            cited_url = str(cite.get("url") or "").rstrip("/")
-            url_matches = not candidate_url or candidate_url == cited_url
-
-            if source_matches and year_matches and authors_match and url_matches:
-                matched_candidate = candidate
-                break
-            if not source_matches:
-                failure_reason = "source_mismatch"
-            elif not year_matches:
-                failure_reason = "year_mismatch"
-            elif not authors_match:
-                failure_reason = "author_mismatch"
-            else:
-                failure_reason = "url_mismatch"
-
-        is_valid = matched_candidate is not None
-
-        results.append({
-            "citation_index": citation_index,
-            "title": cite_title,
-            "valid": is_valid,
-            "source": cite.get("source", "External Literature"),
-            "url": cite.get("url", ""),
-            "reason": "matched_retrieved_candidate" if is_valid else failure_reason,
-        })
-        logger.info("External citation validation: '%s' -> valid=%s", cite_title, is_valid)
-
-    return results
+    ordered = [results_by_index[index] for index in range(len(canonical_citations))]
+    for result in ordered:
+        logger.info(
+            "Citation critique validation: type=%s title='%s' reason=%s",
+            critique_type,
+            result.get("title", ""),
+            result.get("reason"),
+        )
+    return ordered

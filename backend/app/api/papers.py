@@ -38,6 +38,7 @@ from app.services.relevance_service import (
     RelevanceServiceUnavailable,
     classify_document_relevance,
 )
+from app.services.reference_service import extract_reference_list
 from app.services.reproducibility_service import scan_reproducibility_by_domain
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,12 @@ def _build_relevance_sample(pages: list[tuple[int, str]]) -> str:
 def _insert_paper_compat(supabase: Any, paper_data: dict[str, Any]) -> None:
     """Insert a paper while tolerating only non-security optional old columns."""
     row = dict(paper_data)
-    optional_columns = ("reproducibility_signals", "embedding_space", "detected_domain")
+    optional_columns = (
+        "reference_list",
+        "reproducibility_signals",
+        "embedding_space",
+        "detected_domain",
+    )
     while True:
         try:
             supabase.table("papers").insert(row).execute()
@@ -136,6 +142,7 @@ def _persist_ingestion(
     chunks: list[dict[str, Any]],
     embeddings: list[list[float]],
     reproducibility_signals: dict[str, Any],
+    reference_list: list[dict[str, Any]],
 ) -> None:
     """Persist accepted ingestion artifacts with compensating rollback."""
     if len(chunks) != len(embeddings):
@@ -164,6 +171,7 @@ def _persist_ingestion(
                 "parent_paper_id": parent_paper_id,
                 "version_number": version_number,
                 "reproducibility_signals": reproducibility_signals,
+                "reference_list": reference_list,
                 "embedding_space": EMBEDDING_SPACE_ID,
             },
         )
@@ -363,6 +371,15 @@ async def upload_paper(
             relevance.reason,
         )
 
+    # Bibliography extraction is intentionally after the mandatory relevance
+    # gate: rejected non-papers never consume citation-system LLM capacity. Once
+    # admitted, extraction itself degrades to [] so this optional capability can
+    # never become a new upload failure mode.
+    reference_list = await asyncio.to_thread(
+        extract_reference_list,
+        parsed["pages"],
+    )
+
     chunks = await asyncio.to_thread(chunk_pages, parsed["pages"])
     if not chunks:
         raise HTTPException(
@@ -429,6 +446,7 @@ async def upload_paper(
                             chunks=chunks,
                             embeddings=embeddings,
                             reproducibility_signals=reproducibility_signals,
+                            reference_list=reference_list,
                         )
                         return
                     except Exception as exc:

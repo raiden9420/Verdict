@@ -24,7 +24,12 @@ from app.constants import (
     MAX_PDF_SIZE_BYTES,
 )
 from app.models.schemas import AuditCreateRequest, DocumentRelevanceResult
-from app.services import embedding_service, literature_search_service, relevance_service
+from app.services import (
+    embedding_service,
+    literature_search_service,
+    reference_service,
+    relevance_service,
+)
 from app.services.pdf_service import PDFValidationError, chunk_pages, validate_and_parse_pdf
 
 
@@ -163,6 +168,7 @@ class UploadGateTests(unittest.IsolatedAsyncioTestCase):
                     detected_domain="other",
                 ),
             ),
+            patch.object(papers, "extract_reference_list") as extract_references,
             patch.object(papers, "_persist_ingestion") as persist,
         ):
             with self.assertRaises(HTTPException) as raised:
@@ -175,6 +181,7 @@ class UploadGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertTrue(raised.exception.detail["relevance_failed"])
         self.assertTrue(raised.exception.detail["override_allowed"])
+        extract_references.assert_not_called()
         persist.assert_not_called()
 
     async def test_force_is_an_explicit_bypass_and_ingests(self) -> None:
@@ -215,6 +222,11 @@ class UploadGateTests(unittest.IsolatedAsyncioTestCase):
             patch.object(papers, "scan_reproducibility_by_domain", return_value={}),
             patch.object(
                 papers,
+                "extract_reference_list",
+                return_value=[{"id": "ref-1"}],
+            ),
+            patch.object(
+                papers,
                 "_persist_ingestion",
                 side_effect=assert_backend_write_context,
             ) as persist,
@@ -233,6 +245,7 @@ class UploadGateTests(unittest.IsolatedAsyncioTestCase):
             f"{user.id}/{persisted['paper_id']}.pdf",
         )
         self.assertEqual(persisted["user_id"], user.id)
+        self.assertEqual(persisted["reference_list"], [{"id": "ref-1"}])
         self.assertEqual(response.chunk_count, 1)
 
     async def test_force_cannot_bypass_relevance_provider_outage(self) -> None:
@@ -251,6 +264,7 @@ class UploadGateTests(unittest.IsolatedAsyncioTestCase):
                 "classify_document_relevance",
                 side_effect=relevance_service.RelevanceServiceUnavailable("offline"),
             ),
+            patch.object(papers, "extract_reference_list") as extract_references,
             patch.object(papers, "_persist_ingestion") as persist,
         ):
             with self.assertRaises(HTTPException) as raised:
@@ -263,7 +277,58 @@ class UploadGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertFalse(raised.exception.detail["override_allowed"])
+        extract_references.assert_not_called()
         persist.assert_not_called()
+
+    async def test_research_paper_without_reference_section_ingests_empty_list(self) -> None:
+        user = self.current_user()
+        service_client = object()
+        parsed = {
+            "pages": [
+                (
+                    1,
+                    "Abstract\nWe study a research question.\nMethods\n"
+                    "We compare several conditions.\nResults\nThe effect is robust.\n"
+                    "Conclusion\nPrior references are discussed only in prose.",
+                )
+            ],
+            "page_count": 1,
+            "storage_path": "paper.pdf",
+        }
+
+        with (
+            patch.object(papers, "get_user_supabase", return_value=object()),
+            patch.object(papers, "get_service_supabase", return_value=service_client),
+            patch.object(papers, "validate_and_parse_pdf", return_value=parsed),
+            patch.object(
+                papers,
+                "classify_document_relevance",
+                return_value=DocumentRelevanceResult(
+                    is_research_paper=True,
+                    reason="A research manuscript with methods and results.",
+                    detected_domain="social_science",
+                ),
+            ),
+            patch.object(
+                papers,
+                "chunk_pages",
+                return_value=[{"text": "accepted text", "page_number": 1, "chunk_index": 0}],
+            ),
+            patch.object(papers, "embed_batch", return_value=[[0.0] * EMBEDDING_DIMENSION]),
+            patch.object(papers, "scan_reproducibility_by_domain", return_value={}),
+            patch.object(reference_service, "GroqClient") as groq_client,
+            patch.object(papers, "_persist_ingestion") as persist,
+        ):
+            response = await papers.upload_paper(
+                file=self.upload_file(),
+                force=False,
+                parent_paper_id=None,
+                current_user=user,
+            )
+
+        self.assertEqual(response.chunk_count, 1)
+        groq_client.assert_not_called()
+        self.assertEqual(persist.call_args.kwargs["reference_list"], [])
 
     def test_pdf_links_are_short_lived_signed_urls(self) -> None:
         bucket = Mock()

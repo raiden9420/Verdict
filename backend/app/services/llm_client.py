@@ -6,6 +6,8 @@ Phase 2: Multi-provider router adding Groq and OpenRouter with automatic fallbac
 """
 
 import json
+import math
+import re
 import time
 import ssl
 import logging
@@ -27,6 +29,16 @@ logger = logging.getLogger(__name__)
 AgentSchema = TypeVar("AgentSchema", bound=BaseModel)
 SCHEMA_VALIDATION_RETRIES = 3
 _TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+_MAX_PROVIDER_RETRY_DELAY_SECONDS = 60
+_RETRY_AFTER_DURATION_RE = re.compile(
+    r"try\s+again\s+in\s+(?:(?P<minutes>\d+(?:\.\d+)?)m)?"
+    r"(?P<seconds>\d+(?:\.\d+)?)s",
+    re.IGNORECASE,
+)
+_RETRY_AFTER_MILLISECONDS_RE = re.compile(
+    r"try\s+again\s+in\s+(?P<milliseconds>\d+(?:\.\d+)?)ms",
+    re.IGNORECASE,
+)
 
 # Verified SSL context using certifi CA bundle
 ssl_ctx = ssl.create_default_context(cafile=certifi.where())
@@ -35,6 +47,34 @@ ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 def _retry_delay(attempt: int) -> int:
     """Bounded exponential delay; ``attempt`` is zero-indexed."""
     return min(30, LLM_BASE_DELAY_SECONDS * (2**attempt))
+
+
+def _provider_retry_delay(exc: urllib.error.HTTPError, body: str) -> int | None:
+    """Return a bounded provider-requested retry delay, when one is supplied."""
+    candidates: list[float] = []
+    headers = getattr(exc, "headers", None)
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    if retry_after is not None:
+        try:
+            candidates.append(float(retry_after))
+        except (TypeError, ValueError):
+            # HTTP-date Retry-After values are deliberately ignored; the normal
+            # exponential delay remains safe and avoids wall-clock assumptions.
+            pass
+
+    duration_match = _RETRY_AFTER_DURATION_RE.search(body)
+    if duration_match:
+        minutes = float(duration_match.group("minutes") or 0)
+        seconds = float(duration_match.group("seconds"))
+        candidates.append(minutes * 60 + seconds)
+    else:
+        millisecond_match = _RETRY_AFTER_MILLISECONDS_RE.search(body)
+        if millisecond_match:
+            candidates.append(float(millisecond_match.group("milliseconds")) / 1000)
+
+    if not candidates:
+        return None
+    return max(1, min(_MAX_PROVIDER_RETRY_DELAY_SECONDS, math.ceil(max(candidates))))
 
 
 def _is_transient_provider_error(exc: Exception) -> bool:
@@ -79,6 +119,7 @@ def _generate_openai_compatible(
     data_bytes = json.dumps(payload).encode("utf-8")
 
     for attempt in range(LLM_MAX_RETRIES):
+        provider_retry_delay: int | None = None
         try:
             request = urllib.request.Request(
                 endpoint,
@@ -121,6 +162,7 @@ def _generate_openai_compatible(
             logger.warning("%s API HTTP error %d: %s", provider_name, exc.code, body)
             if not _is_transient_provider_error(exc):
                 raise last_exc from exc
+            provider_retry_delay = _provider_retry_delay(exc, body)
         except Exception as exc:
             last_exc = exc
             if not _is_transient_provider_error(exc) and not isinstance(
@@ -137,7 +179,7 @@ def _generate_openai_compatible(
             )
 
         if attempt < LLM_MAX_RETRIES - 1:
-            delay = _retry_delay(attempt)
+            delay = max(_retry_delay(attempt), provider_retry_delay or 0)
             logger.info(
                 "Retrying %s in %ds (attempt %d/%d)",
                 provider_name,
@@ -259,9 +301,21 @@ class GroqClient(LLMClient):
     Groq API Client (OpenAI compatible REST endpoint).
     """
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        response_format: dict | None = None,
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        reasoning_format: str | None = None,
+    ) -> None:
         self.api_key = api_key or GROQ_API_KEY
-        self.model_name = "llama-3.3-70b-versatile"
+        self.model_name = model_name or "llama-3.3-70b-versatile"
+        self.response_format = response_format or {"type": "json_object"}
+        self.max_completion_tokens = max_completion_tokens
+        self.reasoning_effort = reasoning_effort
+        self.reasoning_format = reasoning_format
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
     def generate(self, system_prompt: str, user_prompt: str) -> dict:
@@ -280,9 +334,15 @@ class GroqClient(LLMClient):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "response_format": {"type": "json_object"},
+            "response_format": self.response_format,
             "temperature": 0.4,
         }
+        if self.max_completion_tokens is not None:
+            payload["max_completion_tokens"] = self.max_completion_tokens
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if self.reasoning_format is not None:
+            payload["reasoning_format"] = self.reasoning_format
 
         return _generate_openai_compatible(
             provider_name="Groq",

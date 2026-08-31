@@ -377,14 +377,26 @@ function AgentMessage({ turn, allRoundTurns }: { turn: Turn; allRoundTurns: Turn
             {turn.content.external_citations.map((citation, index) => {
               const normalizedTitle = canonicalTitle(citation.title);
               const validation = externalValidations.find((item) => item.citation_index === index || (Boolean(normalizedTitle) && canonicalTitle(item.title) === normalizedTitle));
-              const validationStatus = validation?.valid === true ? "verified" : validation?.valid === false ? "invalid" : "pending";
+              const validationUnavailable = validation?.reason === "relevance_check_unavailable" || validation?.reason === "existence_check_unavailable";
+              const validationStatus = validationUnavailable ? "unavailable" : validation?.valid === true ? "verified" : validation?.valid === false ? "invalid" : "pending";
+              const validationLabel = validation?.reason === "citation_not_found"
+                ? "Not found"
+                : validation?.reason === "topically_unrelated"
+                  ? "Off-topic"
+                  : validationUnavailable
+                    ? "Check unavailable"
+                    : validationStatus === "verified"
+                      ? "Verified"
+                      : validationStatus === "invalid"
+                        ? "Unverified"
+                        : "Pending";
               return (
                 <div key={`${citation.title}-${index}`} className="external-citation-item">
                   <div className="external-citation-copy">
                     <div className="external-citation-name">{citation.url ? <a href={citation.url} target="_blank" rel="noopener noreferrer">{citation.title}<PIcon name="external" /></a> : citation.title}</div>
                     <div className="external-citation-meta">{citation.authors?.join(", ")} {citation.year ? `(${citation.year})` : ""} {citation.source ? `• ${citation.source}` : ""}{citation.similarity_score != null ? ` • Overlap Similarity: ${Math.round(citation.similarity_score * 100)}%` : ""}</div>
                   </div>
-                  <span className={`validation-badge ${validationStatus}`}>{validationStatus === "verified" ? "Verified" : validationStatus === "invalid" ? "Unverified" : "Pending"}</span>
+                  <span className={`validation-badge ${validationStatus}`} title={validation?.reason || "Citation validation pending"}>{validationLabel}</span>
                 </div>
               );
             })}

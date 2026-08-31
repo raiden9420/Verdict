@@ -63,17 +63,49 @@ class AttackerOutput(StrictAgentModel):
     critique_text: Annotated[StrictStr, Field(min_length=1, max_length=12000)]
     cited_chunk_ids: Annotated[list[ChunkId], Field(max_length=20)]
     external_citations: Annotated[list[ExternalCitation], Field(max_length=20)]
+    cited_reference_id: Annotated[StrictStr, Field(min_length=1, max_length=100)] | None = None
     critique_type: Literal[
         "omission",
         "inconsistency",
         "unstated_assumption",
         "dataset_limitation",
+        "citation_integrity",
+        "missing_baseline",
     ]
 
     @model_validator(mode="after")
-    def omission_does_not_cite_document(self) -> "AttackerOutput":
+    def evidence_matches_critique_type(self) -> "AttackerOutput":
         if self.critique_type == "omission" and self.cited_chunk_ids:
             raise ValueError("omission critiques must leave cited_chunk_ids empty")
+
+        if self.critique_type == "citation_integrity":
+            if self.cited_reference_id is None:
+                raise ValueError(
+                    "citation_integrity critiques must provide cited_reference_id"
+                )
+            if self.external_citations:
+                raise ValueError(
+                    "citation_integrity metadata is resolved from the stored "
+                    "reference list; external_citations must be empty"
+                )
+        elif self.critique_type == "missing_baseline":
+            if self.cited_reference_id is not None:
+                raise ValueError(
+                    "missing_baseline critiques must not provide cited_reference_id"
+                )
+            if not self.external_citations:
+                raise ValueError(
+                    "missing_baseline critiques must cite a supplied external candidate"
+                )
+        else:
+            if self.cited_reference_id is not None:
+                raise ValueError(
+                    "only citation_integrity critiques may provide cited_reference_id"
+                )
+            if self.external_citations:
+                raise ValueError(
+                    "external citations are only valid for missing_baseline critiques"
+                )
         return self
 
 

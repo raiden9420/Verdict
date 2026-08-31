@@ -98,7 +98,6 @@ This is the single highest-leverage addition to the original design. Before the 
 - Dual mode: Author practice mode vs. Reviewer-assist draft report `[P3]`
 - Domain-calibrated personas (ML vs. wet-lab bio vs. social science standards) `[P3]`
 - Exportable formatted review report (PDF/Markdown) `[P3]`
-- Public calibration/benchmark page (verdicts vs. real accept/reject outcomes) `[P4]`
 - API access for institutional integration `[P4]`
 
 ---
@@ -257,7 +256,7 @@ The Debrief Card is **not** produced inline by the per-exchange Referee — it's
 - **Phase 1 — Foundations:** core 3-agent debate loop, in-document grounding + validator, one round topic at a time, split-screen UI, Debrief Card. *(current build)*
 - **Phase 2 — Depth:** external literature grounding, statistical rigor round, novelty/overlap check, reproducibility scoring, multi-provider LLM router, self-consistency checks.
 - **Phase 3 — Product:** accounts, full round/strictness/depth configurability, version tracking & diffing, dual author/reviewer modes, domain-calibrated personas, exportable reports.
-- **Phase 4 — Trust at scale:** public calibration benchmark against real review outcomes, institutional API.
+- **Phase 4 — Trust at scale:** institutional API. (A calibration benchmark was originally planned here too; see §18 — eliminated before being built.)
 
 ---
 
@@ -346,3 +345,198 @@ Building on Phase 1 (§13, still required), a user can additionally:
 3. Select "Reproducibility" and see the reproducibility checklist populated on the Debrief Card.
 4. Get a coherent result even if the Gemini free tier is exhausted mid-audit, via automatic fallback to a second configured provider.
 5. See at least one `CONTESTED` verdict in testing that resulted from a self-consistency disagreement, if you can trigger one — confirming low-confidence verdicts are actually double-checked, not just labeled.
+
+---
+
+## 16. Phase 3 — Technical Specification
+
+Phase 3 turns the working audit engine into a product: real accounts, the configurability the original concept doc described, and outputs people can actually take with them. The core 4-node debate graph (Attacker → Defender → Validator → Referee) is untouched — Phase 3 adds an outer loop (multiple round topics per audit) and configuration (strictness/domain framing) around it, not a new inner mechanism.
+
+**Explicit non-goals:** the citation system overhaul (reference-list extraction) discussed separately is deliberately deferred — don't fold it in here. Institutional API access is Phase 4 (§19).
+
+### 16.1 Accounts, auth & Row-Level Security
+
+Use **Supabase Auth** directly — it's already part of the same free Supabase project, so this adds no new service. Email/password is sufficient for Phase 3; OAuth providers (Google, GitHub) are a nice-to-have, not required.
+
+- Replace the `X-Session-Id` header / `localStorage` UUID scheme entirely. The frontend uses the Supabase client SDK for signup/login, which handles JWT storage and refresh automatically.
+- The backend verifies the Supabase-issued JWT on protected endpoints (Supabase's server SDK can validate/decode it) and derives `user_id` from it — replacing `get_session_id()` with a real `get_current_user()` dependency.
+- Add `user_id UUID REFERENCES auth.users(id)` to `papers` and `audits` (see §16.7).
+- **Turn on the Row-Level Security that was explicitly deferred in migration 001.** Add policies scoping `papers`, `audits`, and their children to `auth.uid() = user_id` (directly or via a subquery through the parent `audit`/`paper` for tables that don't carry `user_id` themselves). This closes the access-control gap flagged in both the Phase 1 and Phase 2 reviews — ownership stops being bookkeeping and becomes enforced.
+- **No migration path for pre-Phase-3 anonymous audits is required.** This is still pre-launch; don't build a "claim your old audits" flow for data that only exists from your own testing.
+
+### 16.2 Full configurability — strictness, depth & multi-topic audits
+
+The `audits` table has carried unused `strictness_level` and `depth` columns since Phase 1 — this is the phase that finally uses them.
+
+- **Strictness** (Constructive Peer / Standard Reviewer / Brutal Adversary): a prompt-framing change only, analogous to `TOPIC_ATTACK_FRAMING`. Add a `STRICTNESS_FRAMING` dict in `constants.py` and thread it into `attacker_system_prompt()` alongside the topic framing. No graph structure changes.
+- **Depth** controls how many round topics run in one audit, not how many exchanges within a round — `EXCHANGES_PER_ROUND` stays fixed at 3 for every depth level, deliberately, to keep per-round-topic cost bounded and predictable. Map depth to a topic count: Fast = 1-2, Deep = 3-4, Exhaustive = 5-6 (all of them). Give each depth level a sensible default topic subset (e.g. Fast defaults to Theoretical Soundness + Experimental Setup) that the user can override, rather than forcing manual selection every time.
+- **Multi-topic audits:** the `Round` entity was already modeled as separate from `Audit` back in §8 specifically to allow more than one round per audit later — this is that moment. The graph needs an outer loop over selected round topics, each running its own fixed 3-exchange inner loop and producing its own Debrief Card, before handing off to the new paper-level report (§16.4).
+
+### 16.3 Domain-calibrated personas
+
+Auto-detect the paper's field with a user-override option, rather than requiring manual categorization. Extend `relevance_service.py`'s existing classification call to also return a detected domain (`ml_cs` / `life_sciences` / `social_science` / `other`) in the same response — this is a schema extension of a call that already reads the document, not a new LLM call.
+
+- Add a `DOMAIN_FRAMING` dict (same pattern as topic/strictness framing) that adjusts what counts as a legitimate critique per field — e.g. missing ablations matters for ML, not for a pure theory paper; human-subjects concerns (IRB, informed consent) matter for some social science and life-sciences work and never for ML.
+- **`reproducibility_service.py` needs the same domain-awareness, not just the Attacker's prompt.** Its current regex signals (GitHub links, batch size, GPU/TPU mentions) are CS/ML-specific — on a biology or social-science paper they'll correctly find nothing, but absence shouldn't be scored the same way. Add domain-specific signal sets: e.g. life sciences — reagent/material availability statements, database deposition (GenBank, PDB); social science — pre-registration, IRB approval, materials repositories (OSF). Route which signal set runs based on the detected domain.
+
+### 16.4 Paper-level final report & dual mode
+
+Distinct from the existing per-round Debrief Card: a new synthesis step that runs once, after all selected round topics complete, aggregating every round's Debrief Card into the "Final report" the frontend nav already has a slot for.
+
+- **Mode** (`author` / `reviewer_assist`) is a framing choice on this final synthesis call, not a change to the underlying debate — the Attacker/Defender/Referee behave identically either way, keeping the trust-critical path untouched. Only the final report's template and tone change: `author` mode produces a coaching-oriented summary; `reviewer_assist` produces a draft formatted as Strengths / Weaknesses / Questions for Authors / Recommendation, ready for a human reviewer to edit.
+
+### 16.5 Exportable reports
+
+Start with **Markdown export** of the paper-level final report — no new dependency, works immediately. Treat PDF export as a stretch goal, not a requirement: PDF-rendering libraries (e.g. `weasyprint`) carry real memory overhead, and this project has already hit a free-tier RAM ceiling once before (the embedding model migration in Phase 2). If PDF is attempted, load-test it on the actual Render free-tier instance before considering it done, the same lesson from that migration.
+
+### 16.6 Version tracking & diffing
+
+Scope this as an **LLM-summarized diff**, not a fully automated claim-matching algorithm — matching critiques worded differently across two independent debate runs is a genuinely hard problem, and a summarized comparison delivers most of the value without it.
+
+- Add `parent_paper_id UUID REFERENCES papers(id)` and `version_number INT DEFAULT 1` to `papers`. Uploading a new version links it to the original.
+- To diff, the new audit should cover the same round topic(s) as the audit being compared against. Feed both sets of verdicts (old and new, same topic) to one LLM call and ask for a structured comparison: which flagged issues appear resolved, which are still open, what's new. Store the result rather than re-deriving it on every view.
+
+### 16.7 Data model additions
+
+| Entity | Change |
+|---|---|
+| `papers` | add `user_id UUID REFERENCES auth.users(id)`, `parent_paper_id UUID REFERENCES papers(id)` (nullable), `version_number INT DEFAULT 1` |
+| `audits` | add `user_id UUID REFERENCES auth.users(id)`, `mode TEXT DEFAULT 'author'`, `domain TEXT`; `strictness_level`/`depth` columns already exist from Phase 1, now populated |
+| `final_reports` *(new table)* | id, audit_id, mode, content (JSONB or markdown text), created_at — the paper-level aggregate, distinct from `debrief_cards` |
+| `version_diffs` *(new table)* | id, audit_id_old, audit_id_new, round_topic, diff_summary (text), created_at |
+| RLS policies | on `papers`, `audits`, and children, scoped to `auth.uid()` (§16.1) |
+
+### 16.8 Non-functional notes
+
+- A multi-topic Exhaustive audit (up to 6 round topics × 3 exchanges each) multiplies the call volume concerns already noted in §14.8 — this is the depth level most likely to strain free-tier quota. Don't default new users into it.
+- Auth failures (expired/invalid JWT) should return a clean 401, not surface as a generic 500 from a downstream ownership check failing unexpectedly.
+
+---
+
+## 17. Definition of Done — Phase 3
+
+Building on Phases 1 and 2 (§13, §15, still required), a user can additionally:
+1. Sign up, log in, and see only their own papers and audits — confirm this by checking that RLS actually blocks cross-account access, not just that the UI happens not to show it.
+2. Configure strictness and depth before starting an audit, and run an audit covering more than one round topic in a single pass, with a Debrief Card per topic.
+3. Get a domain-appropriate critique — confirm a life-sciences or social-science test paper produces different Attacker framing (and different reproducibility signals) than an ML paper does.
+4. Choose reviewer-assist mode and get a final report formatted as a draft review rather than a coaching summary, from the same underlying debate.
+5. Download the final report as Markdown.
+6. Upload a second version of a previously-audited paper and get a diff summary describing what changed.
+
+---
+
+## 18. Tracked gaps & deferred polish
+
+A running list, not a one-time snapshot — append to this rather than losing findings in chat history. Each entry gets a status: **Open** (known, not yet fixed), **Watching** (a risk flagged in spec but not yet confirmed as a real problem in practice), or **Resolved** (closed, kept for history).
+
+| Status | Item | Notes |
+|---|---|---|
+| Resolved | External citation system reference-list overhaul | Reference-list extraction, bibliography-grounded critiques, narrowed missing-baseline search, and unified existence-and-relevance validation are built — see §21-22. |
+| Open | Full in-text claim-to-citation accuracy checking | Follow-on work should locate in-text citation markers and verify that each cited work supports the specific surrounding claim across citation styles; the current validator checks existence and topical relevance only. |
+| Watching | One-call bibliography extraction under provider token limits | Reference extraction deliberately uses one Groq batch and fails open to `[]`; a very large bibliography or saturated shared TPM may therefore leave `citation_integrity` unavailable. Track extraction-failure metrics before deciding whether provider capacity or the one-call constraint should change. |
+| Watching | Citation-relevance threshold calibration | The validator's named `0.45` cosine threshold now catches the required unrelated-work case, but it has not been tuned against a labeled cross-domain citation set. Calibrate before treating small score differences near the boundary as meaningful. |
+| Watching | Multi-topic Exhaustive audits and free-tier quota | Flagged as a risk in §16.8 when Phase 3 was speced. Not yet load-tested against real usage now that it's built — worth an actual timed run before recommending Exhaustive depth to anyone. |
+| Open (minor) | Stale comment in `constants.py` | `EXCHANGES_PER_ROUND = 3` is still commented `# fixed for Phase 1 (Fast depth)` — harmless, but worth a one-line cleanup next time that file is touched. |
+| Not yet reviewed | Frontend coverage of Phase 3 configurability | The Phase 3 backend (auth/RLS, strictness/depth/domain framing, final reports, version diffing) was reviewed in real depth this round. The frontend surfaces for all of it (config screen, mode picker, version upload flow, export button) were not — not confirmed broken, just not checked yet. Worth a pass before leaning on them.
+
+---
+
+## 19. Phase 4 — Technical Specification (Institutional API)
+
+Phase 4 was originally scoped as two pieces — a calibration benchmark and an institutional API. The benchmark has been eliminated (see §18) rather than deferred; this section now covers the API alone. Scope stays deliberately modest — this is a bootstrapped, free-tier project, and the API is sized to prove real value before any heavier investment (billing/tiering) gets built.
+
+**Explicit non-goals:** the citation reference-list overhaul (§18) remains separate from Phase 4 — don't fold it in here. No billing/subscription infrastructure yet — there's no evidence of institutional demand to size it against. No calibration benchmark of any kind — this was a considered and rejected direction, not a backlog item.
+
+### 19.1 Institutional API
+
+Build the technical capability; don't productize it yet.
+
+- **API keys as a second auth path**, not a parallel identity system: a new `api_keys` table (id, user_id, key_hash, created_at, last_used_at, revoked_at) — store only a hash, show the plaintext key once at creation. A key resolves to the same `user_id` a JWT would, so it plugs into the exact same downstream ownership/RLS-scoped logic already built in Phase 3 rather than duplicating it.
+- **Self-service key management** under a user's existing account — generate and revoke keys, no separate signup flow.
+- **Extend `get_current_user`** to accept either a Supabase JWT or an API key in the Authorization header, rather than building a second dependency with separate logic.
+- **Basic usage visibility:** a simple per-key request counter is enough for this phase — not full metering or billing. The goal is knowing whether the API gets real use, which is what would justify building billing later.
+- **Version the surface for the first time:** introduce a `/v1/` prefix now, before any external consumer depends on today's paths. This is a one-time reorganization worth doing deliberately rather than letting institutional integrations lock in unversioned paths.
+- **Clean up the auto-generated OpenAPI docs** (FastAPI's `/docs`) rather than building a separate documentation site — this is close to free given the API is already typed with Pydantic models.
+
+### 19.2 Non-functional notes
+
+- API keys are a new secret class — make sure they're excluded from any logging (the existing LLM/embedding logging in `llm_client.py` and friends should never have a path where a raw API key could end up in a log line).
+
+---
+
+## 20. Definition of Done — Phase 4
+
+Building on Phases 1-3 (still required), an authenticated user can:
+1. Generate an API key from their account, revoke it, and confirm a revoked key stops working immediately.
+2. Make an authenticated request to a `/v1/` endpoint using an API key instead of a JWT and get the same data they'd see in the web app, scoped to their own account only.
+
+
+---
+
+## 21. External Citation System — Overhaul Specification
+
+Numbered after Phase 4 for continuity of the document, but **built before it** — this is the item that was deliberately deferred during Phase 3 planning and is now being picked up first, ahead of the remaining Phase 4 work (the calibration benchmark that was originally planned alongside the institutional API has since been eliminated — see §18).
+
+### 21.1 What's changing, and why this is an upgrade, not just a bug fix
+
+The current mechanism only guards against the *Attacker's own* hallucination: it builds a search query from body-text keywords, sends it to Semantic Scholar/arXiv/OpenAlex, and checks whether whatever comes back exists. On a document with no real academic citation structure (a resume, in the case that surfaced this), it still runs, still gets real-but-irrelevant search hits back, and still validates them as "existing" — because existence was always the only thing being checked.
+
+The overhaul checks something different and more valuable: **whether the paper's own citations are real and topically sound.** That's a genuine research-integrity check (fabricated or misapplied citations are a real and rising concern, more so with LLM-assisted paper writing), not just a defensive measure against the system's own agent hallucinating.
+
+Two citation-critique types exist going forward:
+- **`citation_integrity`** *(new, primary)* — the Attacker questions a specific reference the paper *actually cites*, pulled from its own extracted reference list.
+- **`missing_baseline`** *(existing, retained but narrowed)* — the Attacker searches external literature for something the paper *doesn't* cite. Kept because it serves a genuinely different purpose (prior-art discovery vs. citation-integrity checking), but now explicitly excludes anything already present in the paper's own extracted reference list, so it can no longer falsely flag something as "missing" that's already cited.
+
+### 21.2 Reference list extraction (ingestion-time)
+
+Runs once per paper at upload, alongside the existing relevance classification and reproducibility scan — not per-audit, not per-exchange.
+
+1. **Deterministic section location:** scan extracted text for a references/bibliography heading (case-insensitive match on standalone lines like "References," "REFERENCES," "Bibliography," "Works Cited"), typically near the end of the document. Take everything from that heading to the end of the document (or the next major heading, e.g. "Appendix," if one follows) as the references block.
+2. **Graceful degradation:** if no references section is detected, don't fail the upload — set `reference_list` to empty and disable `citation_integrity` critiques for that paper. `missing_baseline` search (unnarrowed, since there's nothing to exclude against) remains available. A paper without a detected reference list should still be fully auditable, just without this one capability.
+3. **LLM-assisted structuring:** one batched call (not one call per reference) parses the references block into `{raw_text, title, authors, year}` entries — citation formats vary too much (numbered, author-year, IEEE, APA, etc.) for a regex parser to handle reliably, but this is exactly the kind of unstructured-to-structured task an LLM handles well. Route through Groq, consistent with the relevance classifier — keeps this off Gemini's more precious quota.
+4. **Store** as `papers.reference_list` (JSONB array), each entry with a stable id/index so critiques can reference a specific one.
+
+### 21.3 Attacker integration
+
+For `novelty_scope` and `experimental_setup` (the same two topics as before):
+
+- Give the Attacker the paper's `reference_list` as available context. Prefer `citation_integrity` critiques when a specific reference looks load-bearing to a claim; fall back to `missing_baseline` search when nothing from the reference list stands out.
+- `citation_integrity` schema addition: `cited_reference_id` (references an entry in `reference_list`), replacing the free-form external search for this critique type.
+- `missing_baseline` unchanged structurally, but the search step now filters any candidate whose title fuzzy-matches an entry already in `reference_list` before it ever reaches the Attacker.
+
+### 21.4 Validation
+
+One unified existence-and-relevance check, applied to both critique types (this also closes the standing gap where `validate_external_citations` only checked existence):
+
+- **Existence:** search Semantic Scholar/arXiv/OpenAlex for the cited title (from `reference_list` for `citation_integrity`, from the search candidate for `missing_baseline`); confirm a real match.
+- **Relevance:** compute embedding similarity between the cited work and the paper's own content/topic, using the same infrastructure already built for novelty-overlap ranking. This is a lighter-weight signal than fully matching in-text usage to citation content — it catches a citation that's existent but topically unrelated (a real, if cruder, error signal), not a citation that exists and is on-topic but is being *mischaracterized* in how the paper uses it.
+- **Explicitly out of scope for this pass:** full citation-accuracy checking — matching a specific in-text claim ("Smith et al. showed X") against what the cited work actually says. That's a genuinely valuable follow-on capability, but it requires locating in-text citation markers and their surrounding claims across multiple citation styles, which is a meaningfully harder problem than what's being built here. Log it in §18 as a tracked future enhancement rather than folding it in now.
+
+### 21.5 Cost management
+
+Validate lazily — only references the Attacker actually cites during a debate get checked, not the full reference list eagerly at ingestion (a paper can easily have 50-80 references; validating all of them against three rate-limited external APIs on every upload doesn't scale). This matches the existing lazy-validation pattern already used for in-document and external citations elsewhere in the system.
+
+### 21.6 Data model additions
+
+| Entity | Change |
+|---|---|
+| `papers` | add `reference_list JSONB` — extracted structured references, empty array if none detected |
+| Attacker turn schema | add `cited_reference_id` for `citation_integrity` critiques |
+| Validator output | add a `reason` field distinguishing "doesn't exist" from "exists but appears topically unrelated," so the Referee (and any retry context back to the Attacker) can be specific about which failure occurred |
+
+### 21.7 Non-functional notes
+
+- This doesn't touch the core 4-node debate graph structure — it changes what grounding data is available to the Attacker and what the validator checks, the same shape of change Phase 2 made originally.
+- Test explicitly with a paper that has no detectable references section (not just the resume case) to confirm graceful degradation actually degrades gracefully rather than erroring.
+
+---
+
+## 22. Definition of Done — Citation System Overhaul
+
+1. Upload a real research paper and confirm `reference_list` is populated with recognizable entries from its actual bibliography.
+2. Trigger a `citation_integrity` critique and confirm it references a real entry from that paper's own list, not a keyword-guessed search result.
+3. Manually corrupt one reference's title before a test run and confirm the existence check catches it.
+4. Confirm a topically unrelated-but-real citation is now flagged as suspect by the relevance check, not silently accepted the way "metric-learn" was on the resume.
+5. Re-run the original resume upload (or an equivalent non-paper document) and confirm no external citation activity happens on it at all — it should be rejected by the Phase 3 relevance gate before ever reaching this code path.
+6. Confirm `missing_baseline` search no longer flags anything already present in the paper's own `reference_list`.
+7. Upload a paper with no detectable references section and confirm the audit still completes normally, just without `citation_integrity` critiques.
