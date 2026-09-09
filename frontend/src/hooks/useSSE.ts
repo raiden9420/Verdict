@@ -10,6 +10,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { consumeEventStream, validatedEventData, isTurn, isVerdict, isDebrief, isFinalReport, isRoundEvent, isMessageEvent, isVersionDiffsEvent } from "@/lib/audit-stream";
 import {
   ApiError,
   fetchDebriefs,
@@ -156,95 +157,6 @@ function roundFromPayload(value: {
     round_topic: value.round_topic,
     round_topic_name: value.round_topic_name,
   };
-}
-
-interface AuditStreamEvent {
-  type: string;
-  data: string;
-  id?: string;
-}
-
-function eventData<T>(data: string): T | null {
-  try {
-    return JSON.parse(data) as T;
-  } catch {
-    return null;
-  }
-}
-
-function parseEventLines(lines: string[]): AuditStreamEvent | null {
-  let type = "message";
-  let id: string | undefined;
-  const data: string[] = [];
-  let hasEventField = false;
-
-  for (const line of lines) {
-    if (!line || line.startsWith(":")) continue;
-    const separator = line.indexOf(":");
-    const field = separator < 0 ? line : line.slice(0, separator);
-    let value = separator < 0 ? "" : line.slice(separator + 1);
-    if (value.startsWith(" ")) value = value.slice(1);
-
-    if (field === "event") {
-      type = value || "message";
-      hasEventField = true;
-    } else if (field === "data") {
-      data.push(value);
-      hasEventField = true;
-    } else if (field === "id" && !value.includes("\0")) {
-      id = value;
-      hasEventField = true;
-    }
-  }
-
-  return hasEventField ? { type, data: data.join("\n"), id } : null;
-}
-
-async function consumeEventStream(
-  response: Response,
-  onEvent: (event: AuditStreamEvent) => void,
-): Promise<void> {
-  if (!response.body) {
-    throw new ApiError("The live audit stream returned no response body.", 502);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let eventLines: string[] = [];
-
-  const consumeLine = (rawLine: string) => {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (line !== "") {
-      eventLines.push(line);
-      return;
-    }
-    const event = parseEventLines(eventLines);
-    eventLines = [];
-    if (event) onEvent(event);
-  };
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        consumeLine(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-      }
-    }
-
-    buffer += decoder.decode();
-    if (buffer) consumeLine(buffer);
-    const trailingEvent = parseEventLines(eventLines);
-    if (trailingEvent) onEvent(trailingEvent);
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 function isAbortError(error: unknown): boolean {
@@ -433,6 +345,7 @@ export function useSSE(
         auditError: message,
         transportError: null,
       }));
+      void requestSnapshot().then(mergeServerData).catch(() => undefined);
       void requestDebriefs()
         .then(mergeServerDebriefs)
         .catch(() => {
@@ -474,13 +387,14 @@ export function useSSE(
         try {
           const data = await requestSnapshot();
           mergeServerData(data);
-          if (data.status.toLowerCase() === "error") {
+          if (["error", "failed"].includes(data.status.toLowerCase())) {
             update((current) => ({
               ...current,
               status: "error",
               auditError: failureMessage(data),
               transportError: null,
             }));
+            await requestDebriefs().then(mergeServerDebriefs).catch(() => undefined);
             return;
           }
         } catch {
@@ -627,7 +541,7 @@ export function useSSE(
               return;
             }
             if (event.type === "round_start") {
-              const round = eventData<AuditRoundEvent>(event.data);
+              const round = validatedEventData(event.data, isRoundEvent);
               if (!round?.round_id || !round.round_topic) return;
               update((current) => ({
                 ...current,
@@ -637,7 +551,7 @@ export function useSSE(
               return;
             }
             if (event.type === "turn") {
-              const turn = eventData<Turn>(event.data);
+              const turn = validatedEventData(event.data, isTurn);
               if (!turn) return;
               update((current) => ({
                 ...current,
@@ -648,7 +562,7 @@ export function useSSE(
               return;
             }
             if (event.type === "verdict") {
-              const verdict = eventData<Verdict>(event.data);
+              const verdict = validatedEventData(event.data, isVerdict);
               if (!verdict) return;
               update((current) => ({
                 ...current,
@@ -658,12 +572,7 @@ export function useSSE(
               return;
             }
             if (event.type === "process_update") {
-              const data = eventData<{
-                message?: string;
-                round_id?: string | null;
-                round_number?: number | null;
-                round_topic?: string | null;
-              }>(event.data);
+              const data = validatedEventData(event.data, isMessageEvent);
               if (data?.message) {
                 update((current) => ({
                   ...current,
@@ -674,7 +583,7 @@ export function useSSE(
               return;
             }
             if (event.type === "debrief") {
-              const debrief = eventData<DebriefCard>(event.data);
+              const debrief = validatedEventData(event.data, isDebrief);
               if (!debrief) return;
               update((current) => {
                 const debriefs = mergeDebriefs(current.debriefs, [debrief]);
@@ -689,7 +598,7 @@ export function useSSE(
               return;
             }
             if (event.type === "final_report") {
-              const finalReport = eventData<FinalReport>(event.data);
+              const finalReport = validatedEventData(event.data, isFinalReport);
               if (!finalReport) return;
               update((current) => ({
                 ...current,
@@ -699,7 +608,7 @@ export function useSSE(
               return;
             }
             if (event.type === "version_diffs") {
-              const data = eventData<{ items?: VersionDiff[] }>(event.data);
+              const data = validatedEventData(event.data, isVersionDiffsEvent);
               if (!data?.items) return;
               update((current) => ({
                 ...current,
@@ -709,7 +618,7 @@ export function useSSE(
               return;
             }
             if (event.type === "version_diff_error") {
-              const data = eventData<{ message?: string }>(event.data);
+              const data = validatedEventData(event.data, isMessageEvent);
               update((current) => ({
                 ...current,
                 versionDiffError: data?.message || "The revision comparison could not be generated.",
@@ -717,7 +626,7 @@ export function useSSE(
               return;
             }
             if (event.type === "audit_error") {
-              const data = eventData<{ message?: string }>(event.data);
+              const data = validatedEventData(event.data, isMessageEvent);
               failAudit(data?.message || "The audit failed while processing this paper.");
               return;
             }

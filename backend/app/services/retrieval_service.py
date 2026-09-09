@@ -13,6 +13,39 @@ from app.constants import EMBEDDING_SPACE_ID, TOP_K_RETRIEVAL
 
 logger = logging.getLogger(__name__)
 
+_REVIEW_LENSES = {
+    "novelty_scope": (
+        "problem definition contribution claims prior work comparison",
+        "scope generalization assumptions differences from existing methods",
+        "evidence for novelty limitations competing explanations",
+    ),
+    "theoretical_soundness": (
+        "theorem assumptions definitions proof derivation",
+        "boundary cases counterexamples convergence identifiability",
+        "consistency between mathematical claims and stated conditions",
+    ),
+    "experimental_setup": (
+        "experimental design controls datasets baseline comparisons",
+        "evaluation metrics train test split leakage confounding",
+        "robustness sensitivity alternative explanations ablations",
+    ),
+    "reproducibility": (
+        "methods protocol implementation parameters materials availability",
+        "data provenance preprocessing randomization seeds instrumentation",
+        "computational resources reproducibility supplementary details",
+    ),
+    "limitations_impact": (
+        "limitations failure modes stated scope",
+        "generalization populations distribution shift edge cases",
+        "broader impact risks ethics unintended consequences",
+    ),
+    "statistical_rigor": (
+        "statistical design sample size uncertainty effect size",
+        "multiple comparisons assumptions confounders independence",
+        "sensitivity robustness inference limitations confidence intervals",
+    ),
+}
+
 
 _STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
@@ -108,7 +141,7 @@ def _paper_uses_current_embedding_space(paper_id: str) -> bool:
         logger.warning(
             "Could not confirm embedding space for paper %s; using lexical retrieval: %s",
             paper_id,
-            exc,
+            type(exc).__name__,
         )
         return False
 
@@ -160,7 +193,7 @@ def retrieve_chunks(
         logger.warning(
             "Embedding retrieval failed for paper %s; using paper-local lexical ranking: %s",
             canonical_paper_id,
-            exc,
+            type(exc).__name__,
         )
         chunks = _lexical_retrieve(canonical_paper_id, query, top_k)
     logger.debug(
@@ -175,21 +208,20 @@ def retrieve_chunks(
 def build_attacker_query(
     round_topic_name: str,
     prior_claims: list[str],
+    round_topic_slug: str | None = None,
 ) -> str:
-    """
-    Build the retrieval query for the Attacker.
+    """Rotate substantive review lenses without embedding negated old claims.
 
-    Includes the round topic + summaries of already-raised claims so the
-    vector search steers toward regions NOT yet covered.
+    Similarity search is not instruction-following: including 'do not repeat X'
+    retrieves more X. Previous claims belong only in the generator's context.
     """
-    parts = [f"Research paper weaknesses related to: {round_topic_name}"]
-    if prior_claims:
-        parts.append(
-            "The following critiques have ALREADY been raised — "
-            "find a DIFFERENT area to critique:\n"
-            + "\n".join(f"- {c}" for c in prior_claims)
-        )
-    return "\n\n".join(parts)
+    lenses = _REVIEW_LENSES.get(round_topic_slug or "", (
+        "central claims methods assumptions supporting evidence",
+        "boundary conditions controls alternative explanations",
+        "limitations robustness sensitivity generalization",
+    ))
+    lens = lenses[min(len(prior_claims), len(lenses) - 1)]
+    return f"{round_topic_name}. Paper evidence about {lens}."
 
 
 def build_defender_query(
@@ -202,13 +234,8 @@ def build_defender_query(
     Uses the Attacker's critique text so similarity search finds the most
     relevant rebuttal evidence, even if the Attacker cited different sections.
     """
-    parts = [f"Evidence that addresses this critique: {critique_text}"]
-    if cited_chunk_ids:
-        parts.append(
-            "The critique cited these chunks: "
-            + ", ".join(cited_chunk_ids)
-        )
-    return "\n\n".join(parts)
+    # UUIDs carry no semantic evidence and only pollute the query vector.
+    return f"Paper evidence addressing this concern: {critique_text}"
 
 
 def get_chunk_by_id(chunk_id: str, paper_id: str | None = None) -> dict | None:

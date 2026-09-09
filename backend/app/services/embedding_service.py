@@ -119,11 +119,11 @@ def _embed_with_retry(contents: str | list[str], expected_count: int) -> list[li
                 break
             delay = min(8, 2**attempt)
             logger.warning(
-                "Transient embedding failure (attempt %d/%d); retrying in %ds: %s",
+                "Transient embedding failure (attempt %d/%d); retrying in %ds (%s)",
                 attempt + 1,
                 _MAX_ATTEMPTS,
                 delay,
-                exc,
+                type(exc).__name__,
             )
             time.sleep(delay)
 

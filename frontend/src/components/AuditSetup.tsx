@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef } from "react";
-import { PButton, PButtonPure, PIcon, PTag } from "@porsche-design-system/components-react";
+import { Button as PButton, Icon as PIcon } from "@/components/ui";
 import {
   DEPTH_OPTIONS,
   DOMAIN_LABELS,
@@ -37,6 +37,7 @@ export function AuditSetup({
   error,
   auditRunning,
   onUpload,
+  onOpenLibrary,
   onFileDrop,
   onRemove,
   onPrepare,
@@ -64,6 +65,7 @@ export function AuditSetup({
   error: string | null;
   auditRunning: boolean;
   onUpload: () => void;
+  onOpenLibrary: () => void;
   onFileDrop: (file?: File) => void;
   onRemove: () => void;
   onPrepare: () => void;
@@ -80,84 +82,42 @@ export function AuditSetup({
   const topicError = topicSelectionError(depth, topics);
   const depthConfig = depthChoice(depth);
   return (
-    <div className="setup-page phase3-setup" aria-busy={busy}>
-      <span className="visually-hidden" role="status" aria-live="polite">{preparing ? "Preparing and classifying the paper." : launching ? "Starting the configured audit." : ""}</span>
-      <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH INTEGRITY / NEW AUDIT</div>
-      <div className="setup-heading"><div><h1>Put every claim<br /><em>under pressure.</em></h1><p>Configure the scrutiny, cover multiple research dimensions, and leave with a clear paper-level report.</p></div></div>
-
-      {revisionBase && (
-        <section className="revision-banner">
-          <div><PIcon name="compare" /><span><small>NEW PAPER VERSION</small><strong>Building on v{revisionBase.version_number} · {revisionBase.filename}</strong></span></div>
-          <button type="button" onClick={onCancelRevision} disabled={busy || Boolean(preparedPaper)}>{preparedPaper ? "Version link saved" : "Cancel version link"}</button>
-        </section>
-      )}
-
-      <section className="paper-card">
-        <div className="section-kicker">01 — Source document</div>
-        {file ? (
-          <div className="paper-row">
-            <div className="paper-icon"><PIcon name="document" /></div>
-            <div className="paper-details"><strong>{file.name}</strong><span>PDF · {(file.size / (1024 * 1024)).toFixed(1)} MB</span></div>
-            <PTag variant={preparedPaper ? "success" : "secondary"} icon={preparedPaper ? "check" : undefined}>{preparedPaper ? `Prepared · v${preparedPaper.versionNumber}` : "Selected"}</PTag>
-            <PButtonPure icon="close" aria-label="Remove document" onClick={onRemove} disabled={busy} />
-          </div>
-        ) : (
-          <button type="button" className="upload-zone" onClick={onUpload} disabled={busy} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); onFileDrop(event.dataTransfer.files?.[0]); }} aria-describedby="upload-requirements">
-            <span className="upload-icon"><PIcon name="upload" /></span><span><strong>{revisionBase ? "Choose the revised manuscript" : "Choose a research paper"}</strong><small id="upload-requirements">Drop a PDF here or browse · up to 20 MB</small></span>
-          </button>
-        )}
-        {file && !preparedPaper && <div className="prepare-row"><div><strong>Prepare before configuration</strong><span>We extract the PDF, run the relevance gate, and detect its research domain once.</span></div><PButton type="button" variant="secondary" loading={preparing} disabled={busy} onClick={onPrepare}>Prepare paper</PButton></div>}
-        {preparedPaper && <div className="prepared-summary"><div><span className="small-muted">DETECTED DOMAIN</span><strong>{DOMAIN_LABELS[preparedPaper.detectedDomain]}</strong></div><div><span className="small-muted">DOCUMENT</span><strong>{preparedPaper.pageCount} pages · {preparedPaper.chunkCount} evidence chunks</strong></div><span className="prepared-status"><PIcon name="check" />Relevance passed</span></div>}
-        {error && <div className="setup-error" role="alert"><PIcon name="error-filled" /> <span>{error}</span></div>}
-      </section>
-
-      <section className="config-section phase3-config">
-        <div className="section-kicker">02 — Configure scrutiny</div>
-        <div className="config-columns">
-          <ChoiceCards label="Strictness" value={strictness} options={STRICTNESS_OPTIONS} onChange={onStrictnessChange} disabled={busy} />
-          <ChoiceCards label="Report mode" value={mode} options={MODE_OPTIONS} onChange={onModeChange} disabled={busy} />
+    <div className="setup-page" aria-busy={busy}>
+      <header className="page-header"><div><span className="section-kicker">Research workspace / New review</span><h1>Give your paper a second reading.</h1><p className="page-subtitle">Choose the questions that matter. Leave with findings you can trace to the evidence.</p></div></header>
+      <div className="setup-layout">
+        <div className="setup-form">
+          {revisionBase && <section className="revision-banner"><div><PIcon name="compare" /><span><small>Revision of version {revisionBase.version_number}</small><strong>{revisionBase.filename}</strong></span></div><button className="text-link" type="button" onClick={onCancelRevision} disabled={busy || Boolean(preparedPaper)}>{preparedPaper ? "Version link saved" : "Cancel revision"}</button></section>}
+          <section className="setup-section" aria-labelledby="source-title">
+            <div className="section-heading"><span className="step-number">01</span><div><h2 id="source-title">Choose your manuscript</h2><p>A text-based PDF, up to 20 MB and 40 pages.</p></div></div>
+            {file || preparedPaper ? <div className="paper-row"><span className="paper-icon"><PIcon name="document" /></span><div className="paper-details"><strong>{preparedPaper?.filename || file?.name}</strong><span>{preparedPaper ? `Ready to review · Version ${preparedPaper.versionNumber}` : `PDF · ${((file?.size || 0) / (1024 * 1024)).toFixed(1)} MB`}</span></div><button className="icon-button" type="button" aria-label="Remove selected document" onClick={onRemove} disabled={busy}><PIcon name="close" /></button></div> : <button type="button" className="upload-zone" onClick={onUpload} disabled={busy} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!busy) onFileDrop(event.dataTransfer.files?.[0]); }}><PIcon name="upload" /><strong>{revisionBase ? "Choose the revised manuscript" : "Drop your paper here"}</strong><span>or browse for a PDF</span></button>}
+            {!file && !preparedPaper && <div className="upload-alternative"><span>Already prepared a paper?</span><button className="text-link" type="button" onClick={onOpenLibrary} disabled={busy}>Choose from library <PIcon name="arrow-right" /></button></div>}
+            {file && !preparedPaper && <div className="prepare-row"><p>{preparing ? "Reading the manuscript, identifying its field, and preparing source evidence. This can take a few minutes." : "Prepare the document once. You can reuse it for future reviews."}</p><PButton variant="secondary" loading={preparing} disabled={busy} onClick={onPrepare}>{preparing ? "Preparing paper…" : "Prepare paper"}</PButton></div>}
+            {preparedPaper && <div className="prepared-summary" role="status"><PIcon name="check" /><span><strong>{DOMAIN_LABELS[preparedPaper.detectedDomain]}</strong>{preparedPaper.pageCount ? ` · ${preparedPaper.pageCount} pages` : ""}<small>{preparedPaper.relevanceOverridden ? "Prepared with your research-paper classification override." : "Source saved. Ready for an evidence-based review."}</small></span></div>}
+            {error && <div className="setup-error" role="alert"><PIcon name="error-filled" /><span>{error}</span></div>}
+          </section>
+          <section className="setup-section" aria-labelledby="coverage-title">
+            <div className="section-heading"><span className="step-number">02</span><div><h2 id="coverage-title">Set the scope</h2><p>Every selected topic receives three evidence-checked exchanges.</p></div></div>
+            <ChoiceCards label="Coverage" value={depth} options={DEPTH_OPTIONS} onChange={onDepthChange} disabled={busy} compact />
+            <fieldset className="topic-checkbox-group" disabled={busy}><legend>Select {depthConfig.minimumTopics}–{depthConfig.maximumTopics} topics <span>{topics.length} selected</span></legend><div className="topic-checkbox-grid">{ROUND_TOPICS.map(topic => { const selected = topics.includes(topic.slug); const atMaximum = topics.length >= depthConfig.maximumTopics; return <label key={topic.slug} className={`topic-checkbox ${selected ? "selected" : ""}`}><input type="checkbox" checked={selected} disabled={!selected && atMaximum} onChange={() => onTopicToggle(topic.slug)} /><span><strong>{topic.name}</strong><small>{topic.description}</small></span></label>; })}</div></fieldset>
+            {topicError && <p className="selection-note invalid" role="status">{topicError}</p>}
+            <p className="selection-note">{topics.length === depthConfig.maximumTopics ? "Uncheck a topic to select another. " : ""}Coverage changes the breadth of review; it does not guarantee that every issue will be found.</p>
+          </section>
+          <section className="setup-section" aria-labelledby="perspective-title">
+            <div className="section-heading"><span className="step-number">03</span><div><h2 id="perspective-title">Choose the review perspective</h2><p>The evidence standards stay the same across all settings.</p></div></div>
+            <ChoiceCards label="Scrutiny" value={strictness} options={STRICTNESS_OPTIONS} onChange={onStrictnessChange} disabled={busy} compact />
+            <ChoiceCards label="Report for" value={mode} options={MODE_OPTIONS} onChange={onModeChange} disabled={busy} compact />
+            <label className="domain-select"><span>Research field</span><select value={domainSelection} onChange={event => onDomainChange(event.target.value as DomainSelection)} disabled={busy}>{DOMAIN_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.value === "auto" && preparedPaper ? `Detected: ${DOMAIN_LABELS[preparedPaper.detectedDomain]}` : option.label}</option>)}</select><small>The field guides the questions asked, including relevant methods and reproducibility details.</small></label>
+            {revisionBase && <label className="domain-select"><span>Compare with an earlier review</span><select value={comparisonAuditId || ""} onChange={event => onComparisonChange(event.target.value || null)} disabled={busy}><option value="">Use the nearest compatible earlier review</option>{comparisonAudits.map(audit => <option key={audit.audit_id} value={audit.audit_id}>{new Date(audit.created_at).toLocaleDateString()} · {audit.round_topics.length} topics</option>)}</select><small>Choosing a review reuses its settings so the same topics can be compared.</small></label>}
+          </section>
         </div>
-        <ChoiceCards label="Audit depth" value={depth} options={DEPTH_OPTIONS} onChange={onDepthChange} disabled={busy} compact />
-        {depth === "exhaustive" && <div className="quota-warning"><PIcon name="warning" /><span><strong>High call volume</strong> Exhaustive runs use 5–6 topics and can strain provider free-tier quotas.</span></div>}
-      </section>
-
-      <section className="config-section">
-        <div className="section-kicker">03 — Select round topics</div>
-        <fieldset className="topic-checkbox-group" disabled={busy}>
-          <legend><strong>{depthConfig.label} depth</strong> · select {depthConfig.minimumTopics}–{depthConfig.maximumTopics} dimensions</legend>
-          <div className="topic-checkbox-grid">
-            {ROUND_TOPICS.map((topic, index) => {
-              const selected = topics.includes(topic.slug);
-              const atMaximum = topics.length >= depthConfig.maximumTopics;
-              return (
-                <label key={topic.slug} className={`topic-checkbox ${selected ? "selected" : ""} ${!selected && atMaximum ? "limit-reached" : ""}`}>
-                  <input type="checkbox" checked={selected} disabled={!selected && atMaximum} onChange={() => onTopicToggle(topic.slug)} />
-                  <span className="topic-check-mark">{selected ? <PIcon name="check" /> : String(index + 1).padStart(2, "0")}</span>
-                  <span><strong>{topic.name}</strong><small>{topic.description}</small></span>
-                </label>
-              );
-            })}
-          </div>
-        </fieldset>
-        <div className={`selection-note ${topicError ? "invalid" : ""}`}><span className="pulse-dot" /> {topicError || `${topics.length} topics selected · ${topics.length * 3} total exchanges`}</div>
-      </section>
-
-      <section className="config-section">
-        <div className="section-kicker">04 — Domain persona &amp; version comparison</div>
-        <fieldset className="domain-selector" disabled={!preparedPaper || busy}>
-          <legend>Critique persona</legend>
-          <div className="domain-options">
-            {DOMAIN_OPTIONS.map((option) => <label key={option.value} className={domainSelection === option.value ? "selected" : ""}><input type="radio" name="domain" value={option.value} checked={domainSelection === option.value} onChange={() => onDomainChange(option.value)} /><span><strong>{option.value === "auto" && preparedPaper ? `Auto · ${DOMAIN_LABELS[preparedPaper.detectedDomain]}` : option.label}</strong><small>{option.description}</small></span></label>)}
-          </div>
-        </fieldset>
-        {revisionBase && (
-          <label className="comparison-selector"><span>Compare this version with</span><select value={comparisonAuditId || ""} onChange={(event) => onComparisonChange(event.target.value || null)} disabled={busy}><option value="">Auto-select nearest earlier completed audit</option>{comparisonAudits.map((audit) => <option key={audit.audit_id} value={audit.audit_id}>{new Date(audit.created_at).toLocaleDateString()} · {audit.round_topics.length} topics · {audit.depth} · {audit.mode === "reviewer_assist" ? "reviewer assist" : "author"}</option>)}</select><small>Selecting an audit inherits its depth, topics, strictness, mode, and domain so topic-by-topic diffs have a shared baseline.</small></label>
-        )}
-      </section>
-
-      <div className="launch-row">
-        <div><span className="small-muted">AUDIT PLAN</span><strong>{topics.length} topics · {topics.length * 3} exchanges · {mode === "reviewer_assist" ? "reviewer draft" : "author revision brief"}</strong></div>
-        <PButton type="button" onClick={onLaunch} icon="arrow-right" loading={launching} disabled={!preparedPaper || Boolean(topicError) || busy || auditRunning}>Launch {depth} audit</PButton>
+        <aside className="review-plan" aria-labelledby="plan-title">
+          <span className="section-kicker">Your review plan</span><h2 id="plan-title">A focused test of the evidence.</h2>
+          <dl><div><dt>Manuscript</dt><dd>{preparedPaper?.filename || file?.name || "No paper selected"}</dd></div><div><dt>Coverage</dt><dd>{topics.length} topics · {topics.length * 3} exchanges</dd></div><div><dt>Scrutiny</dt><dd>{STRICTNESS_OPTIONS.find(option => option.value === strictness)?.label}</dd></div><div><dt>Deliverable</dt><dd>{mode === "author" ? "Author revision brief" : "Reviewer draft"}</dd></div></dl>
+          <PButton onClick={onLaunch} icon="arrow-right" loading={launching} disabled={!preparedPaper || Boolean(topicError) || busy || auditRunning}>{launching ? "Starting review…" : "Start review"}</PButton>
+          <p className="plan-hint" role="status">{auditRunning ? "A review is running. Its saved results remain available while you plan the next one." : !preparedPaper ? "Prepare a paper to start." : `${topics.length * 3} exchanges plus synthesis. Broader reviews take longer; you can return to saved results from the library.`}</p>
+          <div className="plan-method"><h3>What you’ll receive</h3><ul><li>Findings with source passages</li><li>Challenges, responses, and rulings</li><li>A summary for each topic</li><li>A downloadable revision brief</li></ul></div>
+          <details className="processing-note"><summary>Before you upload</summary><p>Manuscript text is sent to external AI providers to prepare and review it. Literature checks also send search queries derived from the paper to scholarly indexes. Only upload material you are permitted to share with these services.</p><p>Scanned PDFs and image-only figures are not read. Citation checks assess title existence and broad relevance, not claim-to-source accuracy. Verdict supports your judgment; it does not certify a paper.</p></details>
+        </aside>
       </div>
     </div>
   );
@@ -169,8 +129,8 @@ function ChoiceCards<Value extends string>({ label, value, options, onChange, di
 }
 
 export function RelevanceDialog({ prompt, loading, onChangeDocument, onProceed }: { prompt: RelevancePrompt; loading: boolean; onChangeDocument: () => void; onProceed: () => void }) {
-  const changeButtonRef = useRef<HTMLElement>(null);
-  const proceedButtonRef = useRef<HTMLElement>(null);
+  const changeButtonRef = useRef<HTMLButtonElement>(null);
+  const proceedButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const loadingRef = useRef(loading);
   useEffect(() => { loadingRef.current = loading; if (loading) dialogRef.current?.focus(); }, [loading]);
@@ -180,7 +140,7 @@ export function RelevanceDialog({ prompt, loading, onChangeDocument, onProceed }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !loadingRef.current) { event.preventDefault(); onChangeDocument(); return; }
       if (event.key !== "Tab") return;
-      const focusable = [changeButtonRef.current, proceedButtonRef.current].filter((element): element is HTMLElement => Boolean(element && !element.hasAttribute("disabled")));
+      const focusable = [changeButtonRef.current, proceedButtonRef.current].filter((element): element is HTMLButtonElement => Boolean(element && !element.hasAttribute("disabled")));
       if (!focusable.length) { event.preventDefault(); dialogRef.current?.focus(); return; }
       const first = focusable[0]; const last = focusable.at(-1) || first;
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }

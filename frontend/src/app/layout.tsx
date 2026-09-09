@@ -5,10 +5,9 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 import { THEME_BOOTSTRAP_SCRIPT } from "@/lib/theme";
 
 export const metadata: Metadata = {
-  title: "Verdict — Adversarial Research Audit",
+  title: "Verdict — Evidence-led research review",
   description:
-    "Upload a research paper and watch three AI personas debate its merits, " +
-    "producing citation-grounded verdicts and a structured debrief.",
+    "A structured adversarial review of your research paper. Inspect findings, trace source evidence, and plan your next revision.",
 };
 
 export default function RootLayout({
@@ -26,7 +25,7 @@ export default function RootLayout({
       </head>
       <body>
         <ThemeProvider>
-          <Providers>{children}</Providers>
+          <Providers>{process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_PREVIEW === "1" && <div className="local-preview-notice">Local test workspace · Synthetic data only · preview@example.test / preview-only</div>}{children}</Providers>
         </ThemeProvider>
       </body>
     </html>

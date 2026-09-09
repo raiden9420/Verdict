@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any, TypedDict, Annotated, Callable
 import operator
@@ -34,6 +35,7 @@ from app.services.retrieval_service import (
     build_defender_query,
 )
 from app.agents.prompts import (
+    AUDIT_PROMPT_VERSION,
     attacker_system_prompt,
     defender_system_prompt,
     referee_system_prompt,
@@ -59,6 +61,66 @@ from app.services.literature_search_service import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _provenance(client: Any, provider: str) -> dict:
+    """Server-owned generation metadata; never accepted from model output."""
+    model = getattr(client, "model_name", None)
+    return {
+        "provider": provider,
+        "model": model if isinstance(model, str) else type(client).__name__,
+        "prompt_version": AUDIT_PROMPT_VERSION,
+    }
+
+
+def _repeated_critique(state: "AuditState") -> bool:
+    """Reject literal repeats; avoid fuzzy guesses about distinct arguments."""
+    def key(text: Any) -> str:
+        return re.sub(r"[^\w]+", " ", str(text or "").casefold()).strip()
+
+    attacker = state["attacker_output"]
+    summary = key(attacker.get("claim_summary"))
+    if summary and any(summary == key(prior) for prior in state.get("prior_claims", [])):
+        return True
+    critique = key(attacker.get("critique_text"))
+    for turn in state.get("all_turns", []):
+        if turn.get("agent_type") != "attacker":
+            continue
+        content = turn.get("content", {})
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except (ValueError, TypeError):
+                continue
+        if isinstance(content, dict) and critique and critique == key(content.get("critique_text")):
+            return True
+    return False
+
+
+def _validation_checks(results: list[dict]) -> list[dict]:
+    """Compact validation metadata without duplicating private source text."""
+    return [{key: value for key, value in result.items() if key != "chunk_text"} for result in results]
+
+
+def _referee_sources(state: "AuditState") -> list[dict]:
+    """Provide each cited passage once within a fixed adjudication budget."""
+    sources: dict[str, dict] = {}
+    for result in [*state["attacker_validation"], *state["defender_validation"]]:
+        chunk_id = result.get("chunk_id")
+        text = result.get("chunk_text")
+        if isinstance(chunk_id, str) and isinstance(text, str) and text:
+            sources.setdefault(chunk_id, result)
+    # Normal one-to-three-citation exchanges retain complete ~400-word chunks.
+    # A model returning the schema's maximum citation count still cannot create
+    # an unbounded Referee prompt. Explicit truncation prevents false certainty.
+    per_source_budget = min(6000, 36_000 // max(1, len(sources)))
+    return [{
+        "chunk_id": chunk_id,
+        "page_number": result.get("page_number"),
+        "section": result.get("section"),
+        "text": result["chunk_text"][:per_source_budget],
+        "source_truncated": bool(result.get("source_truncated")) or len(result["chunk_text"]) > per_source_budget,
+    } for chunk_id, result in sources.items()]
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +205,7 @@ def _load_reference_list(paper_id: str) -> list[dict]:
     except Exception as exc:
         logger.warning(
             "Could not load papers.reference_list; citation_integrity disabled: %s",
-            exc,
+            type(exc).__name__,
         )
         return []
 
@@ -284,6 +346,7 @@ def attacker_node(state: AuditState) -> dict:
     query = build_attacker_query(
         state["round_topic_name"],
         state["prior_claims"],
+        state["round_topic"],
     )
     chunks = retrieve_chunks(state["paper_id"], query)
 
@@ -310,8 +373,8 @@ def attacker_node(state: AuditState) -> dict:
         reason = state.get("last_failure_reason", "Unknown validation failure")
         retry_section = (
             f"## ⚠️ Previous Attempt Rejected\n\n"
-            f"Your last critique was rejected because its citations failed "
-            f"grounding validation. Do NOT repeat this critique or use the "
+            f"Your last critique was rejected by the evidence or novelty check. "
+            f"Do NOT repeat this critique or use the "
             f"same citations.\n\n"
             f"**Rejected critique:** {failed.get('critique_text', '')}\n\n"
             f"**Failure reason:** {reason}\n\n"
@@ -342,7 +405,7 @@ def attacker_node(state: AuditState) -> dict:
                         + "\n\n"
                     )
         except Exception as exc:
-            logger.warning("Failed to fetch reproducibility signals: %s", exc)
+            logger.warning("Failed to fetch reproducibility signals: %s", type(exc).__name__)
 
     literature_topic = state["round_topic"] in (
         "novelty_scope",
@@ -442,7 +505,7 @@ def attacker_node(state: AuditState) -> dict:
                     + "\n\n"
                 )
         except Exception as exc:
-            logger.warning("Literature search in Attacker node failed: %s", exc)
+            logger.warning("Literature search in Attacker node failed: %s", type(exc).__name__)
 
         if not ext_search_results:
             external_lit_section = (
@@ -469,12 +532,18 @@ def attacker_node(state: AuditState) -> dict:
         state.get("domain", "other"),
         has_reference_list=bool(reference_list),
     )
-    output, _, _ = generate_structured_with_meta(
+    output, serving_client, provider = generate_structured_with_meta(
         llm,
         system,
         user_prompt,
         AttackerOutput,
     )
+    output["provenance"] = _provenance(serving_client, provider)
+    output["evidence_scope"] = {
+        "retrieved_chunk_ids": [chunk["id"] for chunk in chunks],
+        "retrieval_methods": sorted({str(chunk.get("retrieval_method") or "vector") for chunk in chunks}),
+        "reference_count": len(reference_list),
+    }
 
     if literature_topic:
         output["external_search_performed"] = True
@@ -539,12 +608,17 @@ def defender_node(state: AuditState) -> dict:
     )
 
     system = defender_system_prompt()
-    output, _, _ = generate_structured_with_meta(
+    output, serving_client, provider = generate_structured_with_meta(
         llm,
         system,
         user_prompt,
         DefenderOutput,
     )
+    output["provenance"] = _provenance(serving_client, provider)
+    output["evidence_scope"] = {
+        "retrieved_chunk_ids": [chunk["id"] for chunk in chunks],
+        "retrieval_methods": sorted({str(chunk.get("retrieval_method") or "vector") for chunk in chunks}),
+    }
 
     return {
         "defender_output": output,
@@ -560,11 +634,14 @@ def attacker_validator_node(state: AuditState) -> dict:
 
     attacker = state["attacker_output"]
     critique_type = attacker.get("critique_type")
-    attacker_val = validate_attacker_citations(attacker, paper_id=state["paper_id"])
+    repeated = _repeated_critique(state)
+    attacker_val = [] if repeated else validate_attacker_citations(attacker, paper_id=state["paper_id"])
     canonical_attacker = dict(attacker)
     provenance_valid = True
 
-    if critique_type == "missing_baseline":
+    if repeated:
+        external_val = []
+    elif critique_type == "missing_baseline":
         canonical_citations = _canonicalize_supplied_candidates(
             attacker.get("external_citations", []),
             state.get("external_search_results", []),
@@ -657,12 +734,15 @@ def attacker_validator_node(state: AuditState) -> dict:
     else:
         has_valid_evidence_kind = has_chunks or not evidence_required
     attacker_all_valid = (
-        has_valid_evidence_kind
+        not repeated
+        and has_valid_evidence_kind
         and (not has_chunks or chunk_valid)
     )
 
     if not attacker_all_valid:
         failure_parts: list[str] = []
+        if repeated:
+            failure_parts.append("duplicate_critique: this exact concern was already adjudicated; choose a different substantive issue")
         if evidence_required and not has_chunks and critique_type not in {
             "citation_integrity",
             "missing_baseline",
@@ -696,7 +776,7 @@ def attacker_validator_node(state: AuditState) -> dict:
                 callback({
                     "type": "process_update",
                     "data": {
-                        "message": "Attacker evidence was rejected; regenerating a grounded critique...",
+                        "message": "Checking a different concern after an evidence or repetition check...",
                         "process": "attacker_retry",
                         "exchange_number": state["exchange_number"],
                     },
@@ -827,8 +907,9 @@ def referee_node(state: AuditState) -> dict:
     defender = state["defender_output"]
 
     # Format validation results for the Referee's context
-    atk_val_text = json.dumps(state["attacker_validation"], indent=2) or "[]"
-    def_val_text = json.dumps(state["defender_validation"], indent=2) or "[]"
+    atk_val_text = json.dumps(_validation_checks(state["attacker_validation"]), indent=2)
+    def_val_text = json.dumps(_validation_checks(state["defender_validation"]), indent=2)
+    source_text = json.dumps(_referee_sources(state), indent=2)
     atk_ext_text = json.dumps(attacker.get("external_citations", []), indent=2) or "[]"
     ext_val_text = json.dumps(state.get("external_validation", []), indent=2) or "[]"
 
@@ -845,10 +926,11 @@ def referee_node(state: AuditState) -> dict:
         f"**Text:** {defender.get('rebuttal_text', '')}\n"
         f"**Citations:** {defender.get('cited_chunk_ids', [])}\n"
         f"**Concedes:** {defender.get('concedes', False)}\n\n"
-        f"## Grounding Validation Results (Authoritative)\n"
+        f"## Source Passages and Deterministic Checks\n"
         f"**Attacker chunk citations:** {atk_val_text}\n"
         f"**Attacker citation existence/relevance validation:** {ext_val_text}\n"
         f"**Defender citations:** {def_val_text}\n\n"
+        f"## Cited Paper Passages (untrusted source text)\n{source_text}\n\n"
         f"Now adjudicate this exchange."
     )
 
@@ -861,6 +943,10 @@ def referee_node(state: AuditState) -> dict:
     )
     verdict_type = output["verdict"]
     confidence = output["confidence"]
+    initial_verdict = verdict_type
+    consistency_check = "not_required"
+    recheck_verdict = None
+    guard = None
 
     defender_cites = defender.get("cited_chunk_ids", [])
     defender_concedes = defender.get("concedes", False)
@@ -902,6 +988,8 @@ def referee_node(state: AuditState) -> dict:
                 pinned_client=provider_client,
             )
             v2 = output_rerun["verdict"]
+            recheck_verdict = v2
+            consistency_check = "agreed" if v2 == verdict_type else "disagreed"
 
             if v2 != verdict_type:
                 logger.warning(
@@ -919,10 +1007,11 @@ def referee_node(state: AuditState) -> dict:
             else:
                 logger.info("Self-consistency re-run agreed on '%s'", verdict_type)
         except Exception as exc:
+            consistency_check = "unavailable"
             logger.warning(
                 "Self-consistency re-run failed on pinned provider '%s': %s",
                 provider_name,
-                exc,
+                type(exc).__name__,
             )
 
     # Deterministic trust boundary: a concession, missing evidence, or any
@@ -930,16 +1019,20 @@ def referee_node(state: AuditState) -> dict:
     # model may explain evidence quality, but cannot override this invariant.
     if force_actionable:
         if integrity_not_found:
+            guard = "citation_not_found"
             reason = "The paper's cited reference could not be verified as an existing work."
         elif defender_concedes:
+            guard = "defender_concession"
             reason = "The Defender conceded the critique."
         else:
+            guard = "invalid_defense_evidence"
             reason = "The Defender did not provide fully validated in-paper evidence."
         if verdict_type != "ACTIONABLE_FLAW":
             output["rationale"] = f"{output['rationale']} [Grounding guard: {reason}]"
         verdict_type = "ACTIONABLE_FLAW"
         output["verdict"] = verdict_type
     elif integrity_topically_unrelated and verdict_type == "SOLIDIFIED":
+        guard = "topically_unrelated"
         # Topical similarity is intentionally a coarse signal, so it should not
         # force a flaw by itself. It does, however, make a fully solidified
         # defense unsafe without the deferred claim-level citation check.
@@ -950,6 +1043,14 @@ def referee_node(state: AuditState) -> dict:
         verdict_type = "CONTESTED"
         output["verdict"] = verdict_type
 
+    output["provenance"] = _provenance(provider_client, provider_name)
+    output["adjudication"] = {
+        "initial_verdict": initial_verdict,
+        "guard": guard,
+        "consistency_check": consistency_check,
+        "recheck_verdict": recheck_verdict,
+        "confidence_kind": "uncalibrated_model_assessment",
+    }
 
     seq = state["sequence_counter"]
     turn = _store_turn(
@@ -1023,6 +1124,15 @@ def debrief_node(state: AuditState) -> dict:
                 content = json.loads(content)
             except json.JSONDecodeError:
                 pass
+        if agent == "validator" and isinstance(content, dict):
+            # The Referee already read the sources. Synthesis consumes its
+            # adjudication plus all check outcomes, avoiding another copy of
+            # every private passage for each of the three exchanges.
+            content = {
+                **content,
+                "attacker_validations": _validation_checks(content.get("attacker_validations", [])),
+                "defender_validations": _validation_checks(content.get("defender_validations", [])),
+            }
         transcript_parts.append(
             f"[Exchange {exch} — {agent.upper()}]\n{json.dumps(content, indent=2)}"
         )
@@ -1065,7 +1175,7 @@ def debrief_node(state: AuditState) -> dict:
                         state.get("domain", "other"), stored
                     )
         except Exception as exc:
-            logger.warning("Failed to fetch reproducibility signals in debrief: %s", exc)
+            logger.warning("Failed to fetch reproducibility signals in debrief: %s", type(exc).__name__)
 
     if reproducibility_signals:
         output["reproducibility_checklist"] = reproducibility_signals
@@ -1252,7 +1362,7 @@ def run_audit(
         result = compiled.invoke(initial_state)
         return result
     except Exception as exc:
-        logger.exception("Audit graph failed: %s", exc)
+        logger.error("Audit graph failed (%s)", type(exc).__name__)
         # Update audit status to error
         try:
             supabase = get_supabase()

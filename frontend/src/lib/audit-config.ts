@@ -22,17 +22,17 @@ export interface DepthChoice extends Choice<AuditDepth> {
 export const STRICTNESS_OPTIONS: Choice<StrictnessLevel>[] = [
   {
     value: "constructive",
-    label: "Constructive Peer",
+    label: "Constructive",
     description: "Demanding but collaborative, with practical paths to revision.",
   },
   {
     value: "standard",
-    label: "Standard Reviewer",
+    label: "Standard",
     description: "Balanced venue-review standards without softening material flaws.",
   },
   {
     value: "brutal",
-    label: "Brutal Adversary",
+    label: "Exacting",
     description: "Exacting stress tests aimed at publication-blocking weaknesses.",
   },
 ];
@@ -40,16 +40,16 @@ export const STRICTNESS_OPTIONS: Choice<StrictnessLevel>[] = [
 export const DEPTH_OPTIONS: DepthChoice[] = [
   {
     value: "fast",
-    label: "Fast",
-    description: "Focused audit across one or two research dimensions.",
+    label: "Focused",
+    description: "One or two topics to examine in detail.",
     minimumTopics: 1,
     maximumTopics: 2,
     defaultTopics: ["theoretical_soundness", "experimental_setup"],
   },
   {
     value: "deep",
-    label: "Deep",
-    description: "Broader audit across three or four research dimensions.",
+    label: "Extended",
+    description: "Three or four topics for a broader reading.",
     minimumTopics: 3,
     maximumTopics: 4,
     defaultTopics: [
@@ -61,8 +61,8 @@ export const DEPTH_OPTIONS: DepthChoice[] = [
   },
   {
     value: "exhaustive",
-    label: "Exhaustive",
-    description: "Five or six dimensions; highest call volume and longest runtime.",
+    label: "Full scope",
+    description: "Five or six topics for the broadest review.",
     minimumTopics: 5,
     maximumTopics: 6,
     defaultTopics: ROUND_TOPICS.map((topic) => topic.slug),
@@ -78,7 +78,7 @@ export const MODE_OPTIONS: Choice<AuditMode>[] = [
   {
     value: "reviewer_assist",
     label: "Reviewer assist",
-    description: "An editable draft review with strengths, weaknesses, questions, and recommendation.",
+    description: "A review draft with strengths, weaknesses, questions, and recommendation.",
   },
 ];
 

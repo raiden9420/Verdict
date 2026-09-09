@@ -25,6 +25,7 @@ from app.services.literature_search_service import (
 from app.services.retrieval_service import get_chunk_by_id, lexical_similarity
 
 logger = logging.getLogger(__name__)
+MAX_SOURCE_PASSAGE_CHARS = 6000
 
 
 def validate_citation(
@@ -78,7 +79,7 @@ def _validate_citation_batch(
                 "Batch embedding citation validation failed; using conservative "
                 "lexical validation for %d citation(s): %s",
                 len(usable),
-                exc,
+                type(exc).__name__,
             )
             for index, chunk in usable:
                 similarities[index] = lexical_similarity(claim_text, chunk["text"])
@@ -115,7 +116,11 @@ def _validate_citation_batch(
             "chunk_id": chunk_id,
             "valid": is_valid,
             "similarity_score": round(similarity, 4),
-            "chunk_text": chunk["text"][:200],
+            # The adjudicator needs the actual passage, not a leading preview:
+            # semantic overlap alone cannot establish that a rebuttal follows.
+            "chunk_text": chunk["text"][:MAX_SOURCE_PASSAGE_CHARS],
+            "source_truncated": len(chunk["text"]) > MAX_SOURCE_PASSAGE_CHARS,
+            "section": chunk.get("section"),
             "page_number": chunk.get("page_number"),
             "validation_method": validation_method,
             "reason": "grounded" if is_valid else "insufficient_textual_support",
@@ -134,7 +139,8 @@ def validate_attacker_citations(
     If critique_type is 'omission', skip — there's nothing to validate.
     Returns a list of validation results (one per cited chunk).
     """
-    if attacker_output.get("critique_type") in {
+    chunk_ids = attacker_output.get("cited_chunk_ids", [])
+    if not chunk_ids and attacker_output.get("critique_type") in {
         "omission",
         "citation_integrity",
         "missing_baseline",
@@ -145,7 +151,6 @@ def validate_attacker_citations(
         )
         return []
 
-    chunk_ids = attacker_output.get("cited_chunk_ids", [])
     if not chunk_ids:
         if attacker_output.get("external_citations"):
             logger.info(
@@ -331,7 +336,7 @@ def validate_citation_critique(
             logger.warning(
                 "External citation existence validation unavailable for '%s': %s",
                 title,
-                exc,
+                type(exc).__name__,
             )
             results_by_index[citation_index] = _citation_result(
                 citation_index=citation_index,
@@ -423,7 +428,7 @@ def validate_citation_critique(
             except Exception as exc:
                 logger.warning(
                     "External citation relevance validation unavailable: %s",
-                    exc,
+                    type(exc).__name__,
                 )
                 similarities = []
 

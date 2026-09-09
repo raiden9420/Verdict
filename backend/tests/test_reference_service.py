@@ -185,7 +185,7 @@ class ReferenceStructuringTests(unittest.TestCase):
                     "year": "2017",
                 },
                 {
-                    "raw_text": "[2] Bahdanau et al. Neural Machine Translation. 2015.",
+                    "raw_text": "[2] Bahdanau et al. Neural Machine Translation by Jointly Learning to Align and Translate. 2015.",
                     "title": "Neural Machine Translation by Jointly Learning to Align and Translate",
                     "authors": "Dzmitry Bahdanau et al.",
                     "year": 2015,
@@ -194,7 +194,7 @@ class ReferenceStructuringTests(unittest.TestCase):
         }
 
         references = structure_reference_block(
-            "[1] Vaswani et al...\n[2] Bahdanau et al...",
+            "\n".join(entry["raw_text"] for entry in client.generate.return_value["references"]),
             client=client,
         )
 
@@ -202,7 +202,7 @@ class ReferenceStructuringTests(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in references], ["ref-1", "ref-2"])
         self.assertEqual([entry["index"] for entry in references], [1, 2])
         self.assertEqual(references[0]["year"], 2017)
-        self.assertEqual(references[1]["authors"], ["Dzmitry Bahdanau et al."])
+        self.assertEqual(references[1]["authors"], ["Bahdanau et al"])
         system_prompt, user_prompt = client.generate.call_args.args
         self.assertIn("untrusted", system_prompt.lower())
         self.assertIn("UNTRUSTED_REFERENCES_BLOCK_JSON", user_prompt)
@@ -226,7 +226,9 @@ class ReferenceStructuringTests(unittest.TestCase):
             ]
         }
 
-        references = structure_reference_block("References block", client=client)
+        references = structure_reference_block(
+            "\n".join(entry["x"] for entry in client.generate.return_value["r"]), client=client
+        )
 
         self.assertEqual(len(references), 3)
         self.assertEqual(references[0]["authors"], ["Smith, A., and Jones, B"])
@@ -270,7 +272,7 @@ class ReferenceStructuringTests(unittest.TestCase):
             "references": [
                 {
                     "id": "attacker-controlled",
-                    "raw_text": "Valid source text.",
+                    "raw_text": "Author. Valid title. Valid source text.",
                     "title": "Valid title",
                     "authors": [],
                     "year": "not known",
@@ -280,7 +282,7 @@ class ReferenceStructuringTests(unittest.TestCase):
             ]
         }
 
-        references = structure_reference_block("Valid source text.", client=client)
+        references = structure_reference_block("Author. Valid title. Valid source text.", client=client)
 
         self.assertEqual(len(references), 1)
         self.assertEqual(references[0]["id"], "ref-1")

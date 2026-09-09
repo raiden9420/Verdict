@@ -1,36 +1,32 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Verdict frontend
 
-## Getting Started
+Next.js 16.3.4 / React 19.2.8 / TypeScript. Native controls and a small shared UI
+layer support the research workspace. Read `AGENTS.md` before framework edits.
 
-First, run the development server:
+From this directory:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm ci
+npm run preview
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The preview requires the repository's `backend/.venv` with backend dependencies.
+It starts a synthetic, local-only API. Sign in at `http://127.0.0.1:3000` using
+`preview@example.test` / `preview-only`; records reset on shutdown. `/example`
+is the public, fictional worked review. No real provider credentials are needed.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+For a real development backend, copy `.env.example` to `.env.local`, set all
+three public API/Supabase values, then run `npm run dev`. `NEXT_PUBLIC_API_URL`
+is mandatory for production builds. Never place a service-role key in public
+variables. Follow the root README for isolated database setup and worker limits.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Checks: `npm test`, `npm run lint`, `npm run build`. Unit tests cover evidence
+matching, citation explanations, transport payloads, session races, signed URL
+renewal timing, topic boundaries, and workspace recovery. Browser QA uses the
+synthetic preview; there is not yet an automated component/E2E runner.
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Core files: `src/app/page.tsx` coordinates owned workspace state;
+`src/hooks/useSSE.ts` reconciles durable data with live updates;
+`src/lib/audit-stream.ts` validates incoming artifacts;
+`src/lib/session-fetch.ts` owns bounded auth retry;
+`src/components/AuditArena.tsx` presents findings and source evidence.

@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PIcon } from "@porsche-design-system/components-react";
-import { AuthLoadingScreen, AuthScreen } from "@/components/AuthScreen";
+import Link from "next/link";
+import { Brand, Icon as PIcon } from "@/components/ui";
+import { readWorkspaceLocation, workspaceUrl, type WorkspaceView } from "@/lib/workspace-navigation";
+import { AuthLoadingScreen, AuthScreen, PasswordRecoveryScreen } from "@/components/AuthScreen";
 import { useAuth } from "@/components/AuthProvider";
 import { AuditArena } from "@/components/AuditArena";
 import { AuditSetup, RelevanceDialog, type RelevancePrompt } from "@/components/AuditSetup";
@@ -38,7 +40,7 @@ import type {
   StrictnessLevel,
 } from "@/types";
 
-type View = "setup" | "arena" | "report" | "library";
+type View = WorkspaceView;
 
 const ACTIVE_AUDIT_KEY = "verdict_active_audit";
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -117,12 +119,13 @@ function userFacingError(error: unknown, fallback: string): string {
 }
 
 export default function App() {
-  const { user, loading, signOut } = useAuth();
+  const { user, loading, signOut, passwordRecovery } = useAuth();
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
 
   if (loading) return <AuthLoadingScreen />;
   if (!user) return <AuthScreen />;
+  if (passwordRecovery) return <PasswordRecoveryScreen />;
 
   const handleSignOut = async () => {
     if (signingOut) return;
@@ -141,7 +144,7 @@ export default function App() {
 }
 
 function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignOut }: { userId: string; userEmail: string; signingOut: boolean; signOutError: string | null; onSignOut: () => void }) {
-  const [view, setView] = useState<View>("setup");
+  const [view, setViewState] = useState<View>("setup");
   const [restoringAudit, setRestoringAudit] = useState(true);
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [audits, setAudits] = useState<AuditSummary[]>([]);
@@ -170,28 +173,49 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
     activeAudit?.compareToAuditId,
   );
   const auditRunning = Boolean(activeAudit && auditStream.status === "in_progress");
+  const activeAuditRef = useRef(activeAudit);
+  const historyRequestRef = useRef(0);
+  const prepareGuard = useRef(false);
+  const launchGuard = useRef(false);
+  useEffect(() => { activeAuditRef.current = activeAudit; }, [activeAudit]);
+
+  const setView = useCallback((next: View, auditId?: string | null, replace = false) => {
+    const url = workspaceUrl(next, auditId ?? activeAuditRef.current?.auditId);
+    if (`${window.location.pathname}${window.location.search}` !== url) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", url);
+    }
+    setViewState(next);
+    window.requestAnimationFrame(() => {
+      document.getElementById("main-content")?.focus({ preventScroll: true });
+      window.scrollTo({ top: 0 });
+    });
+  }, []);
+
 
   const refreshHistory = useCallback(async () => {
+    const request = ++historyRequestRef.current;
     setHistoryLoading(true);
     setHistoryError(null);
     try {
       const [nextPapers, nextAudits] = await Promise.all([fetchPapers(), fetchAudits()]);
+      if (request !== historyRequestRef.current) return;
       setPapers(nextPapers);
       setAudits(nextAudits);
     } catch (error) {
-      setHistoryError(userFacingError(error, "Your paper and audit history could not be loaded."));
+      if (request === historyRequestRef.current) setHistoryError(userFacingError(error, "Your paper and audit history could not be loaded."));
     } finally {
-      setHistoryLoading(false);
+      if (request === historyRequestRef.current) setHistoryLoading(false);
     }
   }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const restored = readActiveAudit(userId);
-      if (restored) {
-        setActiveAudit(restored);
-        setView("arena");
-      }
+      const location = readWorkspaceLocation(window.location.search);
+      if (restored && (!location.auditId || location.auditId === restored.auditId)) setActiveAudit(restored);
+      const initialView = location.view || (restored ? "arena" : "setup");
+      setViewState(initialView);
+      if (!location.view) window.history.replaceState(null, "", workspaceUrl(initialView, restored?.auditId));
       setRestoringAudit(false);
       void refreshHistory();
     }, 0);
@@ -215,6 +239,31 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
     }, 0);
     return () => window.clearTimeout(timer);
   }, [activeAudit, audits, papers, userId]);
+
+
+  useEffect(() => {
+    const restoreLocation = () => {
+      const location = readWorkspaceLocation(window.location.search);
+      const target = location.view || "setup";
+      if (location.auditId && location.auditId !== activeAuditRef.current?.auditId) {
+        const summary = audits.find(item => item.audit_id === location.auditId);
+        if (summary) {
+          const next = activeAuditFromHistory(summary, paperForAudit(papers, summary));
+          setActiveAudit(next);
+          saveActiveAudit(userId, next);
+        } else if (!historyLoading && !historyError) {
+          setHistoryError("This review is unavailable for this account. Choose a saved review below.");
+          setViewState("library");
+          window.history.replaceState(null, "", workspaceUrl("library"));
+          return;
+        }
+      }
+      setViewState(target);
+    };
+    window.addEventListener("popstate", restoreLocation);
+    if (!restoringAudit && !historyLoading) restoreLocation();
+    return () => window.removeEventListener("popstate", restoreLocation);
+  }, [audits, papers, userId, restoringAudit, historyLoading, historyError]);
 
   const terminalRefreshKey = useRef<string | null>(null);
   useEffect(() => {
@@ -241,14 +290,19 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
   }, []);
 
   const selectFile = (selected?: File) => {
+    if (!selected || prepareGuard.current || launchGuard.current) return;
     setSetupError(null);
     setRelevancePrompt(null);
     setPreparedPaper(null);
-    if (!selected) return;
     const looksLikePdf = selected.type === "application/pdf" || selected.name.toLowerCase().endsWith(".pdf");
     if (!looksLikePdf) {
       setFile(null);
       setSetupError("Choose a PDF file. Other document formats cannot be audited.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    if (selected.size === 0) {
+      setFile(null); setSetupError("This file is empty. Choose a text-based research PDF.");
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
@@ -270,7 +324,8 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
   }, []);
 
   const preparePaper = async (force = false) => {
-    if (!file || preparing || launching) return;
+    if (!file || prepareGuard.current || launchGuard.current) return;
+    prepareGuard.current = true;
     setPreparing(true);
     setSetupError(null);
     try {
@@ -284,6 +339,7 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
         versionNumber: response.version_number,
         pageCount: response.page_count,
         chunkCount: response.chunk_count,
+        relevanceOverridden: force,
       };
       setPreparedPaper(prepared);
       setRelevancePrompt(null);
@@ -296,15 +352,17 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
         setSetupError(userFacingError(error, "The paper could not be prepared."));
       }
     } finally {
+      prepareGuard.current = false;
       setPreparing(false);
     }
   };
 
   const launchAudit = async () => {
-    if (!preparedPaper || launching || preparing) return;
+    if (!preparedPaper || launchGuard.current || prepareGuard.current) return;
     const selectionError = topicSelectionError(depth, topics);
     if (selectionError) { setSetupError(selectionError); return; }
     if (auditRunning) { setSetupError("An audit is already running. Let it finish before launching another one."); return; }
+    launchGuard.current = true;
     setLaunching(true);
     setSetupError(null);
     try {
@@ -333,12 +391,13 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
       saveActiveAudit(userId, nextAudit);
       setActiveAudit(nextAudit);
       terminalRefreshKey.current = null;
-      setView("arena");
+      setView("arena", nextAudit.auditId);
       setRelevancePrompt(null);
       await refreshHistory();
     } catch (error) {
       setSetupError(userFacingError(error, "The configured audit could not be launched."));
     } finally {
+      launchGuard.current = false;
       setLaunching(false);
     }
   };
@@ -376,7 +435,7 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
     clearSelectedFile();
     setView("setup");
     window.requestAnimationFrame(() => fileInputRef.current?.click());
-  }, [applyAuditConfiguration, auditRunning, audits, clearSelectedFile]);
+  }, [applyAuditConfiguration, auditRunning, audits, clearSelectedFile, setView]);
 
   const startRevisionFromActive = () => {
     if (!activeAudit) return;
@@ -401,7 +460,19 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
     saveActiveAudit(userId, nextAudit);
     setActiveAudit(nextAudit);
     terminalRefreshKey.current = null;
-    setView(target);
+    setView(target, nextAudit.auditId);
+  };
+
+
+  const auditExistingPaper = (paper: PaperSummary) => {
+    clearSelectedFile();
+    setRevisionBase(null);
+    setComparisonAuditId(null);
+    setPreparedPaper({ paperId: paper.id, filename: paper.filename, fileKey: `stored:${paper.id}`,
+      detectedDomain: paper.detected_domain, parentPaperId: paper.parent_paper_id,
+      versionNumber: paper.version_number, pageCount: paper.page_count });
+    setDomainSelection("auto");
+    setView("setup");
   };
 
   const beginNewAudit = () => {
@@ -421,17 +492,17 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <header className="topbar" inert={relevancePrompt ? true : undefined}>
-        <div className="brand-lockup"><span className="verdict-wordmark">Verdict</span><span className="brand-divider" /><span className="product-name">ADVERSARIAL AUDIT</span></div>
-        <div className="topbar-meta"><span className="trust-mark"><PIcon name="check" /> Evidence-grounded</span><ThemeToggle /><div className="account-control"><span title={userEmail}>{userEmail}</span><button type="button" onClick={onSignOut} disabled={signingOut}>{signingOut ? "Logging out…" : "Log out"}</button></div></div>
+        <Brand />
+        <div className="topbar-meta"><Link className="text-link method-link" href="/example">Worked example</Link><ThemeToggle /><div className="account-control"><span title={userEmail}>{userEmail}</span><button type="button" onClick={onSignOut} disabled={signingOut}>{signingOut ? "Logging out…" : "Log out"}</button></div></div>
       </header>
       {signOutError && <div className="signout-error" role="alert">{signOutError}</div>}
 
       <aside className="sidebar" inert={relevancePrompt ? true : undefined}>
-        <div className="sidebar-label">Audit workspace</div>
+        <div className="sidebar-label">Workspace</div>
         <nav className="side-nav" aria-label="Audit stages">
-          <NavButton index="01" label="Configure audit" active={view === "setup"} disabled={busy || restoringAudit} onClick={() => setView("setup")} />
-          <NavButton index="02" label="Audit results" active={view === "arena"} disabled={!activeAudit || busy || restoringAudit} onClick={() => setView("arena")} live={view === "arena" && auditStream.status === "in_progress" && auditStream.connectionState === "live"} />
-          <NavButton index="03" label="Final report" active={view === "report"} disabled={!activeAudit || busy || restoringAudit} onClick={() => setView("report")} />
+          <NavButton index="01" label="New review" active={view === "setup"} disabled={busy || restoringAudit} onClick={() => setView("setup")} />
+          <NavButton index="02" label="Findings & evidence" active={view === "arena"} disabled={!activeAudit || busy || restoringAudit} onClick={() => setView("arena")} live={view === "arena" && auditStream.status === "in_progress" && auditStream.connectionState === "live"} />
+          <NavButton index="03" label="Revision brief" active={view === "report"} disabled={!activeAudit || busy || restoringAudit} onClick={() => setView("report")} />
           <NavButton index="04" label="Paper library" active={view === "library"} disabled={busy || restoringAudit} onClick={() => setView("library")} />
         </nav>
         <div className="sidebar-footer"><div className="mini-label">CURRENT PAPER</div><div className="paper-mini"><PIcon name="document" /><span>{workspacePaperName || "No paper selected"}</span></div><div className="paper-mini-meta">{activeAudit ? `Version ${activeAudit.versionNumber} · ${activeAudit.roundTopics.length || "…"} topics` : file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : ""}</div></div>
@@ -439,11 +510,12 @@ function AuthenticatedApp({ userId, userEmail, signingOut, signOutError, onSignO
 
       <main id="main-content" className="main-content" inert={relevancePrompt ? true : undefined} tabIndex={-1}>
         {restoringAudit && <div className="workspace-loading" role="status"><span className="loading-mark" aria-hidden="true" /><strong>Restoring your private workspace</strong><span>Loading the active audit and account-scoped history.</span></div>}
-        {!restoringAudit && view === "setup" && <AuditSetup file={file} preparedPaper={preparedPaper} revisionBase={revisionBase} comparisonAudits={comparisonAudits} comparisonAuditId={comparisonAuditId} strictness={strictness} depth={depth} topics={topics} mode={mode} domainSelection={domainSelection} preparing={preparing} launching={launching} error={setupError} auditRunning={auditRunning} onUpload={() => fileInputRef.current?.click()} onFileDrop={selectFile} onRemove={clearSelectedFile} onPrepare={() => { void preparePaper(); }} onLaunch={() => { void launchAudit(); }} onCancelRevision={() => { setRevisionBase(null); setComparisonAuditId(null); }} onComparisonChange={changeComparison} onStrictnessChange={setStrictness} onDepthChange={changeDepth} onTopicToggle={toggleTopic} onModeChange={setMode} onDomainChange={setDomainSelection} />}
+        {!restoringAudit && view === "setup" && <AuditSetup file={file} preparedPaper={preparedPaper} revisionBase={revisionBase} comparisonAudits={comparisonAudits} comparisonAuditId={comparisonAuditId} strictness={strictness} depth={depth} topics={topics} mode={mode} domainSelection={domainSelection} preparing={preparing} launching={launching} error={setupError} auditRunning={auditRunning} onUpload={() => fileInputRef.current?.click()} onFileDrop={selectFile} onRemove={clearSelectedFile} onPrepare={() => { void preparePaper(); }} onLaunch={() => { void launchAudit(); }} onCancelRevision={() => { setRevisionBase(null); setComparisonAuditId(null); }} onComparisonChange={changeComparison} onStrictnessChange={setStrictness} onDepthChange={changeDepth} onTopicToggle={toggleTopic} onModeChange={setMode} onDomainChange={setDomainSelection} onOpenLibrary={() => setView("library")} />}
+        {!restoringAudit && (view === "arena" || view === "report") && !activeAudit && <div className="library-empty"><PIcon name="book" /><h2>Choose a review from your library.</h2><p>Your saved evidence and reports are available there.</p><button className="button button-primary" onClick={() => setView("library")}>Open library</button></div>}
         <input ref={fileInputRef} type="file" accept=".pdf,application/pdf" onChange={(event) => selectFile(event.target.files?.[0])} className="file-input" />
         {!restoringAudit && view === "arena" && activeAudit && <AuditArena key={activeAudit.auditId} audit={activeAudit} stream={auditStream} onNewAudit={beginNewAudit} onOpenReport={() => setView("report")} />}
         {!restoringAudit && view === "report" && activeAudit && <FinalReportView key={activeAudit.auditId} audit={activeAudit} stream={auditStream} onOpenArena={() => setView("arena")} onNewVersion={startRevisionFromActive} />}
-        {!restoringAudit && view === "library" && <LibraryView papers={papers} audits={audits} loading={historyLoading} error={historyError} onRefresh={() => { void refreshHistory(); }} onOpenAudit={openHistoricalAudit} onNewVersion={startRevision} />}
+        {!restoringAudit && view === "library" && <LibraryView papers={papers} audits={audits} loading={historyLoading} error={historyError} onRefresh={() => { void refreshHistory(); }} onOpenAudit={openHistoricalAudit} onNewVersion={startRevision} onAuditPaper={auditExistingPaper} onNewAudit={beginNewAudit} />}
       </main>
 
       {relevancePrompt && <RelevanceDialog prompt={relevancePrompt} loading={preparing} onChangeDocument={() => { setRelevancePrompt(null); clearSelectedFile(); window.requestAnimationFrame(() => fileInputRef.current?.click()); }} onProceed={() => { void preparePaper(true); }} />}

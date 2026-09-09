@@ -1,0 +1,461 @@
+{
+  "audit": {
+    "auditId": "20000000-0000-4000-8000-000000000001",
+    "paperId": "10000000-0000-4000-8000-000000000001",
+    "filename": "Spaced retrieval and delayed recall.pdf",
+    "roundIds": [
+      "30000000-0000-4000-8000-000000000001"
+    ],
+    "roundTopics": [
+      "experimental_setup"
+    ],
+    "strictnessLevel": "standard",
+    "depth": "fast",
+    "mode": "author",
+    "domain": "social_science",
+    "versionNumber": 1
+  },
+  "stream": {
+    "turns": [
+      {
+        "id": "50000000-0000-4000-8000-000000000011",
+        "exchange_number": 1,
+        "agent_type": "attacker",
+        "sequence": 1,
+        "content": {
+          "claim_summary": "Extra practice time confounds the reported advantage.",
+          "critique_text": "The intervention combines retrieval with thirty minutes of additional study. Page 2 says time on task was not matched. This prevents the reported eight-point difference from isolating a retrieval-specific effect. Use a time-matched active control, or narrow the conclusion to the combined intervention.",
+          "critique_type": "textual",
+          "cited_chunk_ids": [
+            "40000000-0000-4000-8000-000000000002"
+          ],
+          "external_citations": [],
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000012",
+        "exchange_number": 1,
+        "agent_type": "defender",
+        "sequence": 2,
+        "content": {
+          "rebuttal_text": "The concern is justified. The limitations on page 3 explicitly acknowledge this design constraint. The manuscript supports an advantage for the combined study package, but it cannot attribute that advantage to retrieval alone. The causal wording should be narrowed.",
+          "concedes": true,
+          "cited_chunk_ids": [
+            "40000000-0000-4000-8000-000000000003"
+          ],
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000013",
+        "exchange_number": 1,
+        "agent_type": "validator",
+        "sequence": 3,
+        "content": {
+          "attacker_validations": [
+            {
+              "chunk_id": "40000000-0000-4000-8000-000000000002",
+              "valid": true,
+              "similarity_score": 0.78,
+              "chunk_text": "2. Methods\nStudents were randomly allocated to conditions using a computer-generated sequence before the first practice session. The same instructor taught both groups. The control group reread the lesson material once in a supervised twenty-minute session. The retrieval group attended that same session and received three additional ten-minute retrieval sessions. Time on task was not matched across conditions.\n\n3. Assessment\nPractice questions and delayed-test questions were drawn from separate pools. No item from a practice session appeared verbatim in the delayed test. Delayed responses were scored using the same rubric by raters blinded to group assignment.\n\nAll participants were enrolled in one introductory university course. No external cohort or course was included. The primary outcome was the percentage of taught material recalled on the delayed test.",
+              "page_number": 2,
+              "section": "Methods & comparison conditions",
+              "source_truncated": false,
+              "validation_method": "embedding",
+              "reason": "grounded"
+            }
+          ],
+          "defender_validations": [
+            {
+              "chunk_id": "40000000-0000-4000-8000-000000000003",
+              "valid": true,
+              "similarity_score": 0.78,
+              "chunk_text": "4. Results\nThe mean delayed-test score was 67% in the retrieval group and 59% in the rereading group. The observed difference was eight percentage points. The report does not provide a confidence interval for that difference.\n\n5. Discussion\nThese results suggest that adding spaced retrieval sessions may improve delayed recall under the conditions tested. They could inform study routines in other courses, although that transfer was not measured.\n\n6. Limitations\nThe study used one course at one institution. The retrieval group spent more time practicing than the control group. We cannot separate the effect of retrieval from the effect of extra practice time in this design. Replication with a time-matched control and a second course would help clarify both mechanism and transfer.",
+              "page_number": 3,
+              "section": "Results & limitations",
+              "source_truncated": false,
+              "validation_method": "embedding",
+              "reason": "grounded"
+            }
+          ],
+          "external_validations": [],
+          "attacker_citations_valid": true,
+          "defender_citations_valid": true
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000014",
+        "exchange_number": 1,
+        "agent_type": "referee",
+        "sequence": 4,
+        "content": {
+          "verdict": "ACTIONABLE_FLAW",
+          "confidence": 0.84,
+          "rationale": "The defense concedes the confound, and the limitations corroborate it. Narrow the causal claim to the combined intervention. A time-matched comparison is needed to isolate the effect of retrieval.",
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000021",
+        "exchange_number": 2,
+        "agent_type": "attacker",
+        "sequence": 5,
+        "content": {
+          "claim_summary": "Repeated test items could explain the recall difference.",
+          "critique_text": "A delayed-test advantage could be item familiarity rather than retained understanding if the retrieval group rehearsed the same questions. The assessment procedure needs to distinguish practice items from test items.",
+          "critique_type": "textual",
+          "cited_chunk_ids": [
+            "40000000-0000-4000-8000-000000000002"
+          ],
+          "external_citations": [],
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000022",
+        "exchange_number": 2,
+        "agent_type": "defender",
+        "sequence": 6,
+        "content": {
+          "rebuttal_text": "Page 2 states that practice and delayed-test questions came from separate pools, with no verbatim overlap. The same scoring rubric and blinded raters were used across groups. This directly addresses the proposed explanation based on repeated test items.",
+          "concedes": false,
+          "cited_chunk_ids": [
+            "40000000-0000-4000-8000-000000000002"
+          ],
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000023",
+        "exchange_number": 2,
+        "agent_type": "validator",
+        "sequence": 7,
+        "content": {
+          "attacker_validations": [
+            {
+              "chunk_id": "40000000-0000-4000-8000-000000000002",
+              "valid": true,
+              "similarity_score": 0.78,
+              "chunk_text": "2. Methods\nStudents were randomly allocated to conditions using a computer-generated sequence before the first practice session. The same instructor taught both groups. The control group reread the lesson material once in a supervised twenty-minute session. The retrieval group attended that same session and received three additional ten-minute retrieval sessions. Time on task was not matched across conditions.\n\n3. Assessment\nPractice questions and delayed-test questions were drawn from separate pools. No item from a practice session appeared verbatim in the delayed test. Delayed responses were scored using the same rubric by raters blinded to group assignment.\n\nAll participants were enrolled in one introductory university course. No external cohort or course was included. The primary outcome was the percentage of taught material recalled on the delayed test.",
+              "page_number": 2,
+              "section": "Methods & comparison conditions",
+              "source_truncated": false,
+              "validation_method": "embedding",
+              "reason": "grounded"
+            }
+          ],
+          "defender_validations": [
+            {
+              "chunk_id": "40000000-0000-4000-8000-000000000002",
+              "valid": true,
+              "similarity_score": 0.78,
+              "chunk_text": "2. Methods\nStudents were randomly allocated to conditions using a computer-generated sequence before the first practice session. The same instructor taught both groups. The control group reread the lesson material once in a supervised twenty-minute session. The retrieval group attended that same session and received three additional ten-minute retrieval sessions. Time on task was not matched across conditions.\n\n3. Assessment\nPractice questions and delayed-test questions were drawn from separate pools. No item from a practice session appeared verbatim in the delayed test. Delayed responses were scored using the same rubric by raters blinded to group assignment.\n\nAll participants were enrolled in one introductory university course. No external cohort or course was included. The primary outcome was the percentage of taught material recalled on the delayed test.",
+              "page_number": 2,
+              "section": "Methods & comparison conditions",
+              "source_truncated": false,
+              "validation_method": "embedding",
+              "reason": "grounded"
+            }
+          ],
+          "external_validations": [],
+          "attacker_citations_valid": true,
+          "defender_citations_valid": true
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000024",
+        "exchange_number": 2,
+        "agent_type": "referee",
+        "sequence": 8,
+        "content": {
+          "verdict": "SOLIDIFIED",
+          "confidence": 0.91,
+          "rationale": "The assessment procedure directly answers this challenge: the two item pools are separate and scoring is blinded. The defense is supported within this narrow scope; it does not resolve the separate time-on-task confound.",
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000031",
+        "exchange_number": 3,
+        "agent_type": "attacker",
+        "sequence": 9,
+        "content": {
+          "claim_summary": "Transfer beyond the tested course remains an open question.",
+          "critique_text": "The discussion suggests the approach could inform study routines in other courses, but the study only measures recall in one course. The boundary between a tested effect and a proposed application should be explicit.",
+          "critique_type": "textual",
+          "cited_chunk_ids": [
+            "40000000-0000-4000-8000-000000000003"
+          ],
+          "external_citations": [],
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000032",
+        "exchange_number": 3,
+        "agent_type": "defender",
+        "sequence": 10,
+        "content": {
+          "rebuttal_text": "The discussion on page 3 presents transfer as a possibility and says it was not measured. The limitations identify the single-course sample and propose replication in a second course. The broader application is an acknowledged hypothesis, rather than a demonstrated result.",
+          "concedes": false,
+          "cited_chunk_ids": [
+            "40000000-0000-4000-8000-000000000003"
+          ],
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000033",
+        "exchange_number": 3,
+        "agent_type": "validator",
+        "sequence": 11,
+        "content": {
+          "attacker_validations": [
+            {
+              "chunk_id": "40000000-0000-4000-8000-000000000003",
+              "valid": true,
+              "similarity_score": 0.78,
+              "chunk_text": "4. Results\nThe mean delayed-test score was 67% in the retrieval group and 59% in the rereading group. The observed difference was eight percentage points. The report does not provide a confidence interval for that difference.\n\n5. Discussion\nThese results suggest that adding spaced retrieval sessions may improve delayed recall under the conditions tested. They could inform study routines in other courses, although that transfer was not measured.\n\n6. Limitations\nThe study used one course at one institution. The retrieval group spent more time practicing than the control group. We cannot separate the effect of retrieval from the effect of extra practice time in this design. Replication with a time-matched control and a second course would help clarify both mechanism and transfer.",
+              "page_number": 3,
+              "section": "Results & limitations",
+              "source_truncated": false,
+              "validation_method": "embedding",
+              "reason": "grounded"
+            }
+          ],
+          "defender_validations": [
+            {
+              "chunk_id": "40000000-0000-4000-8000-000000000003",
+              "valid": true,
+              "similarity_score": 0.78,
+              "chunk_text": "4. Results\nThe mean delayed-test score was 67% in the retrieval group and 59% in the rereading group. The observed difference was eight percentage points. The report does not provide a confidence interval for that difference.\n\n5. Discussion\nThese results suggest that adding spaced retrieval sessions may improve delayed recall under the conditions tested. They could inform study routines in other courses, although that transfer was not measured.\n\n6. Limitations\nThe study used one course at one institution. The retrieval group spent more time practicing than the control group. We cannot separate the effect of retrieval from the effect of extra practice time in this design. Replication with a time-matched control and a second course would help clarify both mechanism and transfer.",
+              "page_number": 3,
+              "section": "Results & limitations",
+              "source_truncated": false,
+              "validation_method": "embedding",
+              "reason": "grounded"
+            }
+          ],
+          "external_validations": [],
+          "attacker_citations_valid": true,
+          "defender_citations_valid": true
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "50000000-0000-4000-8000-000000000034",
+        "exchange_number": 3,
+        "agent_type": "referee",
+        "sequence": 12,
+        "content": {
+          "verdict": "CONTESTED",
+          "confidence": 0.66,
+          "rationale": "The limitation is disclosed, so the manuscript does not establish a demonstrated transfer effect. Whether its tentative recommendation is appropriately cautious remains a judgment call. Keep the boundary visible and evaluate a second course before a broad recommendation.",
+          "provenance": {
+            "provider": "Illustrative example",
+            "model": "No model was called",
+            "prompt_version": "example-1"
+          }
+        },
+        "created_at": "2026-09-08T10:00:00Z",
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      }
+    ],
+    "verdicts": [
+      {
+        "id": "60000000-0000-4000-8000-000000000001",
+        "exchange_number": 1,
+        "claim_summary": "Extra practice time confounds the reported advantage.",
+        "verdict_type": "ACTIONABLE_FLAW",
+        "confidence": 0.84,
+        "rationale": "The defense concedes the confound, and the limitations corroborate it. Narrow the causal claim to the combined intervention. A time-matched comparison is needed to isolate the effect of retrieval.",
+        "cited_chunk_ids": [
+          "40000000-0000-4000-8000-000000000002",
+          "40000000-0000-4000-8000-000000000003"
+        ],
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "60000000-0000-4000-8000-000000000002",
+        "exchange_number": 2,
+        "claim_summary": "Repeated test items could explain the recall difference.",
+        "verdict_type": "SOLIDIFIED",
+        "confidence": 0.91,
+        "rationale": "The assessment procedure directly answers this challenge: the two item pools are separate and scoring is blinded. The defense is supported within this narrow scope; it does not resolve the separate time-on-task confound.",
+        "cited_chunk_ids": [
+          "40000000-0000-4000-8000-000000000002"
+        ],
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      },
+      {
+        "id": "60000000-0000-4000-8000-000000000003",
+        "exchange_number": 3,
+        "claim_summary": "Transfer beyond the tested course remains an open question.",
+        "verdict_type": "CONTESTED",
+        "confidence": 0.66,
+        "rationale": "The limitation is disclosed, so the manuscript does not establish a demonstrated transfer effect. Whether its tentative recommendation is appropriately cautious remains a judgment call. Keep the boundary visible and evaluate a second course before a broad recommendation.",
+        "cited_chunk_ids": [
+          "40000000-0000-4000-8000-000000000003"
+        ],
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      }
+    ],
+    "debriefs": [
+      {
+        "id": "70000000-0000-4000-8000-000000000001",
+        "executive_synthesis": "The study supports a narrowly scoped comparison of two study packages. It does not isolate retrieval from additional time on task. Separate item pools address the repeated-item concern, while transfer to other courses remains a question for replication.",
+        "solidified_strengths": [
+          "Exchange 2: Separate practice and test item pools, with blinded scoring, address the repeated-item challenge."
+        ],
+        "actionable_weaknesses": [
+          "Exchange 1: Narrow the causal claim to the combined study package. Add a time-matched active control to isolate the retrieval mechanism."
+        ],
+        "contested_points": [
+          "Exchange 3: Preserve the explicit boundary between a finding in one course and a proposed application elsewhere."
+        ],
+        "round_id": "30000000-0000-4000-8000-000000000001",
+        "round_number": 1,
+        "round_topic": "experimental_setup"
+      }
+    ],
+    "debrief": {
+      "id": "70000000-0000-4000-8000-000000000001",
+      "executive_synthesis": "The study supports a narrowly scoped comparison of two study packages. It does not isolate retrieval from additional time on task. Separate item pools address the repeated-item concern, while transfer to other courses remains a question for replication.",
+      "solidified_strengths": [
+        "Exchange 2: Separate practice and test item pools, with blinded scoring, address the repeated-item challenge."
+      ],
+      "actionable_weaknesses": [
+        "Exchange 1: Narrow the causal claim to the combined study package. Add a time-matched active control to isolate the retrieval mechanism."
+      ],
+      "contested_points": [
+        "Exchange 3: Preserve the explicit boundary between a finding in one course and a proposed application elsewhere."
+      ],
+      "round_id": "30000000-0000-4000-8000-000000000001",
+      "round_number": 1,
+      "round_topic": "experimental_setup"
+    },
+    "finalReport": {
+      "id": "80000000-0000-4000-8000-000000000001",
+      "audit_id": "20000000-0000-4000-8000-000000000001",
+      "mode": "author",
+      "content": "> Worked example \u2014 fictional manuscript and illustrative review. No real study was evaluated and no AI call produced these findings.\n\n## Overall Assessment\nThe experiment provides a useful comparison of two study packages, but it cannot isolate the effect of retrieval practice from extra time spent studying. The strongest next step is to narrow the claim and design a time-matched comparison.\n\n## Preserved Strengths\nSeparate question pools and blinded scoring answer the concern about repeated test items. Preserve these details in the methods section. This supported defense applies to item familiarity, not to every aspect of the experiment.\n\n## Priority Revisions\n**1. Match the conclusion to the design.** Describe the result as an advantage for the combined intervention. The retrieval condition received thirty additional minutes of practice; the current study cannot separate retrieval from time on task.\n\n**2. Make the next comparison decisive.** Use an active control with the same total study time to examine whether retrieval itself explains the advantage.\n\n## Open Judgment Calls\nThe discussion acknowledges that transfer to other courses was not measured. Keep any broader recommendation tentative, and evaluate another course before claiming generalizability.\n\n## Revision Plan\n- Revise the abstract and discussion to refer to the combined intervention.\n- Preserve the separate question-pool and blinded-scoring descriptions.\n- Keep the single-course limitation beside the broader application claim.\n- Plan a time-matched comparison and a replication in a second course.\n\n## Finding Register\nThese three illustrative findings preserve the relationship between each concern, ruling, and source. Open **Findings & evidence** to read the full discussion.\n\n### T1.E1 \u00b7 Revision needed\nExtra practice time confounds the reported advantage. **Source: pages 2 and 3.** The response concedes this limitation; the causal conclusion needs revision.\n\n### T1.E2 \u00b7 Supported\nSeparate practice and delayed-test question pools address the repeated-item concern. **Source: page 2.** The support is specific to that challenge.\n\n### T1.E3 \u00b7 Open question\nTransfer beyond the tested course remains untested. **Source: page 3.** The limitation is disclosed; the appropriate strength of the broader recommendation remains a judgment call.\n\n## Scope of This Review\nOne topic, three exchanges. Other aspects of the paper were not reviewed. These outcomes are not a score for the paper. Citation relevance and model confidence are not measures of scientific truth.\n",
+      "created_at": "2026-09-08T10:00:00Z"
+    },
+    "versionDiffs": [],
+    "activeRound": {
+      "round_id": "30000000-0000-4000-8000-000000000001",
+      "round_number": 1,
+      "round_topic": "experimental_setup"
+    },
+    "processMessage": null,
+    "status": "completed",
+    "connectionState": "done",
+    "auditError": null,
+    "transportError": null,
+    "versionDiffError": null
+  },
+  "source": {
+    "title": "Spaced retrieval and delayed recall",
+    "pages": [
+      {
+        "page": 1,
+        "title": "Abstract & study design",
+        "body": "ILLUSTRATIVE MANUSCRIPT \u2014 created to explain Verdict. These are fictional study details, not published research.\n\nSpaced retrieval and delayed recall\n\nAbstract\nWe studied whether brief retrieval practice improves delayed recall in an introductory university course. Ninety-six students were randomly assigned to spaced retrieval or a rereading control. The retrieval group completed three additional ten-minute practice sessions over one week. Both groups completed a delayed test fourteen days after the lesson.\n\nThe retrieval group scored a mean of 67%, compared with 59% in the control group. We interpret this difference as evidence that spaced retrieval can improve learning.\n\n1. Research question\nDoes adding spaced retrieval to ordinary study improve recall two weeks later? The intervention was evaluated within a single introductory course, using short-answer questions about the taught material."
+      },
+      {
+        "page": 2,
+        "title": "Methods & comparison conditions",
+        "body": "2. Methods\nStudents were randomly allocated to conditions using a computer-generated sequence before the first practice session. The same instructor taught both groups. The control group reread the lesson material once in a supervised twenty-minute session. The retrieval group attended that same session and received three additional ten-minute retrieval sessions. Time on task was not matched across conditions.\n\n3. Assessment\nPractice questions and delayed-test questions were drawn from separate pools. No item from a practice session appeared verbatim in the delayed test. Delayed responses were scored using the same rubric by raters blinded to group assignment.\n\nAll participants were enrolled in one introductory university course. No external cohort or course was included. The primary outcome was the percentage of taught material recalled on the delayed test."
+      },
+      {
+        "page": 3,
+        "title": "Results & limitations",
+        "body": "4. Results\nThe mean delayed-test score was 67% in the retrieval group and 59% in the rereading group. The observed difference was eight percentage points. The report does not provide a confidence interval for that difference.\n\n5. Discussion\nThese results suggest that adding spaced retrieval sessions may improve delayed recall under the conditions tested. They could inform study routines in other courses, although that transfer was not measured.\n\n6. Limitations\nThe study used one course at one institution. The retrieval group spent more time practicing than the control group. We cannot separate the effect of retrieval from the effect of extra practice time in this design. Replication with a time-matched control and a second course would help clarify both mechanism and transfer."
+      }
+    ]
+  }
+}

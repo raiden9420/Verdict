@@ -21,32 +21,32 @@ export type AuditMode = "author" | "reviewer_assist";
 export const ROUND_TOPICS: RoundTopic[] = [
   {
     slug: "novelty_scope",
-    name: "Novelty, Scope & Problem Formulation",
+    name: "Contribution & scope",
     description: "Is the problem well-posed, and is the contribution actually novel?",
   },
   {
     slug: "theoretical_soundness",
-    name: "Theoretical Soundness & Mathematical Rigor",
+    name: "Theory & assumptions",
     description: "Are the assumptions, proofs, and derivations sound?",
   },
   {
     slug: "experimental_setup",
-    name: "Experimental Setup, Datasets & Baselines",
+    name: "Experiments & baselines",
     description: "Are the experiments fair, and are the baselines appropriate?",
   },
   {
     slug: "reproducibility",
-    name: "Reproducibility, Compute & Ablation Studies",
+    name: "Reproducibility",
     description: "Could someone else reproduce this? Are ablations sufficient?",
   },
   {
     slug: "limitations_impact",
-    name: "Limitations, Broader Impact & Edge Cases",
+    name: "Limitations & impact",
     description: "Does the paper honestly address where it breaks down?",
   },
   {
     slug: "statistical_rigor",
-    name: "Statistical Rigor & Methodological Validity",
+    name: "Statistical methods",
     description: "Are p-values, sample sizes, effect sizes, and multiple comparisons handled correctly?",
   },
 ];
@@ -147,6 +147,9 @@ export interface ExternalValidationResult {
 }
 
 export interface TurnContent {
+  provenance?: { provider?: string; model?: string; prompt_version?: string };
+  evidence_scope?: { retrieved_chunk_ids?: string[]; retrieval_methods?: string[]; reference_count?: number };
+  adjudication?: { initial_verdict?: string; guard?: string | null; consistency_check?: string; recheck_verdict?: string | null; confidence_kind?: string };
   // Attacker fields
   claim_summary?: string;
   critique_text?: string;
@@ -177,6 +180,8 @@ export interface ValidationResult {
   valid: boolean;
   similarity_score: number;
   chunk_text?: string;
+  section?: string;
+  source_truncated?: boolean;
   page_number?: number;
   validation_method?: string;
   reason?: string;

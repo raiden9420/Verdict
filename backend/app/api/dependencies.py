@@ -82,8 +82,8 @@ def get_current_user(
     """Verify a Supabase Bearer JWT and return its canonical user identity.
 
     ``auth.get_user`` validates the token with Supabase Auth rather than trusting
-    an unverified local decode. All authentication failures intentionally map to
-    the same clean 401 so expired tokens never surface as downstream 500s.
+    an unverified local decode. Only a definitive authentication rejection is a
+    401: an Auth outage must not cause the browser to discard a valid session.
     """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise _unauthorized("Missing Bearer access token")
@@ -94,6 +94,29 @@ def get_current_user(
 
     try:
         response = get_anon_supabase().auth.get_user(access_token)
+    except Exception as exc:
+        # Supabase Auth API errors expose ``status``; HTTPX status errors use
+        # ``response.status_code``. Do not classify arbitrary exception text
+        # (which may contain a provider body or a token) as an expired session.
+        raw_status = getattr(exc, "status", None)
+        if raw_status is None:
+            raw_status = getattr(getattr(exc, "response", None), "status_code", None)
+        invalid_token_codes = {
+            "bad_jwt", "invalid_jwt", "no_authorization", "session_not_found",
+            "user_not_found", "user_banned", "unexpected_audience",
+        }
+        if str(raw_status) in {"401", "403"} or (
+            str(raw_status) in {"400", "404"}
+            and getattr(exc, "code", None) in invalid_token_codes
+        ):
+            raise _unauthorized() from exc
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sign-in verification is temporarily unavailable. Please retry shortly.",
+            headers={"Retry-After": "5"},
+        ) from exc
+
+    try:
         raw_user_id = _user_id(_response_user(response))
         parsed_user_id = uuid.UUID(str(raw_user_id))
         if parsed_user_id.int == 0:

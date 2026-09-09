@@ -5,15 +5,18 @@ Deterministic, NO LLM.
 Caches search results in-process. Degrades gracefully if any API fails or times out.
 """
 
-import os
+import copy
 import re
 import ssl
 import json
 import logging
+import threading
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -27,9 +30,13 @@ logger = logging.getLogger(__name__)
 ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 
-# In-process cache: query -> list of paper dicts
-_SEARCH_CACHE: dict[str, list[dict]] = {}
-_SEARCH_STATUS_CACHE: dict[str, int] = {}
+# Bounded process-local cache. Partial sweeps are never cached, and negative
+# results expire sooner so newly indexed work can be found without a restart.
+_SEARCH_CACHE: OrderedDict[tuple[str, int], tuple[float, list[dict]]] = OrderedDict()
+_SEARCH_CACHE_LOCK = threading.Lock()
+_SEARCH_CACHE_MAX_ENTRIES = 256
+_SEARCH_CACHE_TTL_SECONDS = 900
+_SEARCH_NEGATIVE_TTL_SECONDS = 60
 LITERATURE_SOURCE_COUNT = 3
 
 # High enough to tolerate punctuation and small extraction/provider differences
@@ -153,7 +160,7 @@ def search_semantic_scholar(
     except Exception as exc:
         if raise_on_error:
             raise
-        logger.warning("Semantic Scholar search failed: %s", exc)
+        logger.warning("Semantic Scholar search failed: %s", type(exc).__name__)
         return []
 
 
@@ -209,7 +216,7 @@ def search_arxiv(
     except Exception as exc:
         if raise_on_error:
             raise
-        logger.warning("arXiv search failed: %s", exc)
+        logger.warning("arXiv search failed: %s", type(exc).__name__)
         return []
 
 
@@ -254,7 +261,7 @@ def search_openalex(
     except Exception as exc:
         if raise_on_error:
             raise
-        logger.warning("OpenAlex search failed: %s", exc)
+        logger.warning("OpenAlex search failed: %s", type(exc).__name__)
         return []
 
 
@@ -268,15 +275,23 @@ def search_external_literature(
     Search Semantic Scholar, arXiv, and OpenAlex in parallel.
     Deduplicate by normalized title and cache in-process.
     """
-    normalized_q = query.strip().lower()
-    if normalized_q in _SEARCH_CACHE:
-        logger.info("Returning cached external search results for: '%s'", query)
-        cached = _SEARCH_CACHE[normalized_q]
-        if with_status:
-            return cached, _SEARCH_STATUS_CACHE.get(normalized_q, 0)
-        return cached
+    if not isinstance(limit_per_source, int) or isinstance(limit_per_source, bool) or not 1 <= limit_per_source <= 100:
+        raise ValueError("limit_per_source must be an integer between 1 and 100")
+    normalized_q = " ".join(query.casefold().split())
+    if not normalized_q:
+        return ([], 0) if with_status else []
+    cache_key = (normalized_q, limit_per_source)
+    with _SEARCH_CACHE_LOCK:
+        entry = _SEARCH_CACHE.get(cache_key)
+        if entry is not None:
+            expires_at, cached = entry
+            if time.monotonic() < expires_at:
+                _SEARCH_CACHE.move_to_end(cache_key)
+                result = copy.deepcopy(cached)
+                return (result, LITERATURE_SOURCE_COUNT) if with_status else result
+            del _SEARCH_CACHE[cache_key]
 
-    logger.info("Searching external literature across APIs for: '%s'", query)
+    logger.info("Searching external literature across APIs (query length %d)", len(query))
     all_results: list[dict] = []
     successful_sources = 0
 
@@ -301,14 +316,16 @@ def search_external_literature(
                 raise_on_error=True,
             ): "OpenAlex",
         }
-        for future in as_completed(futures):
+        # Every request has already started in parallel. Read in fixed source
+        # order so network timing cannot choose canonical citation metadata.
+        for future in futures:
             source_name = futures[future]
             try:
                 res = future.result()
                 successful_sources += 1
                 all_results.extend(res)
             except Exception as exc:
-                logger.warning("Error fetching literature from %s: %s", source_name, exc)
+                logger.warning("Error fetching literature from %s: %s", source_name, type(exc).__name__)
 
     # Deduplicate by normalized title
     seen_titles: set[str] = set()
@@ -324,8 +341,12 @@ def search_external_literature(
     # cached false negative after a transient outage. Cache only complete
     # sweeps so later calls can retry every source.
     if successful_sources == LITERATURE_SOURCE_COUNT:
-        _SEARCH_CACHE[normalized_q] = deduped
-        _SEARCH_STATUS_CACHE[normalized_q] = successful_sources
+        ttl = _SEARCH_CACHE_TTL_SECONDS if deduped else _SEARCH_NEGATIVE_TTL_SECONDS
+        with _SEARCH_CACHE_LOCK:
+            _SEARCH_CACHE[cache_key] = (time.monotonic() + ttl, copy.deepcopy(deduped))
+            _SEARCH_CACHE.move_to_end(cache_key)
+            while len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX_ENTRIES:
+                _SEARCH_CACHE.popitem(last=False)
     if with_status:
         return deduped, successful_sources
     return deduped
@@ -352,7 +373,7 @@ def rank_candidates_by_novelty_overlap(
     try:
         vectors = embed_batch([paper_abstract[:1000], *candidate_texts])
     except Exception as exc:
-        logger.warning("Failed to embed novelty candidates as a batch: %s", exc)
+        logger.warning("Failed to embed novelty candidates as a batch: %s", type(exc).__name__)
         return candidates[:top_k]
 
     paper_vec = vectors[0]

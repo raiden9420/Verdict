@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
+from supabase_auth.errors import AuthApiError, AuthInvalidJwtError, AuthRetryableError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -53,7 +54,7 @@ class AuthDependencyTests(unittest.TestCase):
 
     def test_expired_or_invalid_token_is_clean_401(self) -> None:
         auth = Mock()
-        auth.get_user.side_effect = RuntimeError("JWT expired")
+        auth.get_user.side_effect = AuthApiError("JWT expired", 401, "bad_jwt")
         auth_client = SimpleNamespace(auth=auth)
 
         with (
@@ -65,6 +66,43 @@ class AuthDependencyTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 401)
         self.assertEqual(raised.exception.detail, "Invalid or expired access token")
         self.assertNotIn("JWT expired", raised.exception.detail)
+
+    def test_explicit_invalid_token_codes_are_401_even_when_provider_uses_400(self) -> None:
+        for error in (
+            AuthInvalidJwtError("private-token-value"),
+            AuthApiError("private-token-value", 400, "bad_jwt"),
+            AuthApiError("private-token-value", 404, "session_not_found"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                client = SimpleNamespace(auth=Mock())
+                client.auth.get_user.side_effect = error
+                with (
+                    patch.object(dependencies, "get_anon_supabase", return_value=client),
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    dependencies.get_current_user(self.credentials())
+                self.assertEqual(raised.exception.status_code, 401)
+                self.assertNotIn("private-token-value", str(raised.exception.detail))
+
+    def test_auth_outages_preserve_session_with_retryable_503(self) -> None:
+        for error in (
+            TimeoutError("private-token-value"),
+            ConnectionError("private-token-value"),
+            AuthRetryableError("private-token-value", 503),
+            AuthApiError("private-token-value", 429, "over_request_rate_limit"),
+            RuntimeError("private-token-value"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                client = SimpleNamespace(auth=Mock())
+                client.auth.get_user.side_effect = error
+                with (
+                    patch.object(dependencies, "get_anon_supabase", return_value=client),
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    dependencies.get_current_user(self.credentials())
+                self.assertEqual(raised.exception.status_code, 503)
+                self.assertEqual(raised.exception.headers, {"Retry-After": "5"})
+                self.assertNotIn("private-token-value", str(raised.exception.detail))
 
     def test_missing_or_malformed_auth_user_is_rejected(self) -> None:
         for response in (

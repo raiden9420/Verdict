@@ -87,8 +87,8 @@ def classify_document_relevance(text_sample: str) -> DocumentRelevanceResult:
         except Exception as exc:
             failures.append(f"Groq: {type(exc).__name__}")
             logger.warning(
-                "Groq relevance classification failed: %s. Falling back to Gemini...",
-                exc,
+                "Groq relevance classification failed (%s). Falling back to Gemini...",
+                type(exc).__name__,
             )
 
     # 2. Fall back to Gemini if Groq is not configured or failed.
@@ -97,7 +97,7 @@ def classify_document_relevance(text_sample: str) -> DocumentRelevanceResult:
         return _validate_result(GeminiClient().generate(system_prompt, user_prompt))
     except Exception as exc:
         failures.append(f"Gemini: {type(exc).__name__}")
-        logger.warning("Gemini relevance classification failed: %s", exc)
+        logger.warning("Gemini relevance classification failed (%s)", type(exc).__name__)
 
     providers = ", ".join(failures) or "no provider configured"
     raise RelevanceServiceUnavailable(

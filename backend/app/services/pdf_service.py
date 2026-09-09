@@ -71,7 +71,7 @@ def validate_and_parse_pdf(
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as exc:
-        logger.info("Rejected malformed PDF %s: %s", filename, exc)
+        logger.info("Rejected malformed PDF for paper %s (%s)", paper_id, type(exc).__name__)
         raise PDFValidationError("Unable to open this PDF because it is malformed.") from exc
 
     try:

@@ -33,8 +33,9 @@ export interface PreparedPaper {
   detectedDomain: Domain;
   parentPaperId?: string | null;
   versionNumber: number;
-  pageCount: number;
-  chunkCount: number;
+  pageCount?: number | null;
+  chunkCount?: number | null;
+  relevanceOverridden?: boolean;
 }
 
 export interface RoundPlan {

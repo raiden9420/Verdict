@@ -2,6 +2,42 @@
 
 This root `AGENTS.md` is the durable handoff that Codex discovers automatically when a session starts in this repository. Read it before changing code. It describes the implemented product, not just the original design. For a narrower explanation of setup and use, see `README.md`. Treat source code, migrations, and tests as authoritative when this file or a planning document drifts.
 
+## September 2026 product update
+
+Substantial changes follow the older baseline below. Source/tests remain
+authoritative. The UI now uses native
+controls (`components/ui.tsx`) and findings-first presentation, with paper reuse,
+library search, URL history, password recovery, renewable PDF URLs, Markdown/JSON
+exports, browser print styling, and a public fictional `/example`. Porsche was
+removed; Next is 16.3.4. User-facing depth names are Focused/Extended/Full scope;
+strictness names are Constructive/Standard/Exacting. Wire values are unchanged.
+
+New turns record provider/model/prompt version and retrieval or adjudication
+metadata in existing JSON content. New reports append a deterministic finding
+register; old saved reports remain unchanged. Bibliography titles/raw entries
+must match source text. Similarity is never represented as entailment. Referee
+context is bounded, duplicate accepted challenges are rejected, and retrieval
+uses topic-specific queries. Three accepted exchanges and citation guards remain.
+
+Readiness now covers all product tables including migration 005 and caches
+success for 30 seconds. Literature cache holds at most 256 entries, with 15-minute
+positive and 60-second negative TTLs; incomplete sweeps remain uncached. Auth
+provider outages return 503 without signing users out. Cancellation does not
+prematurely release live worker admission/diff locks. Library round loading is
+batched. Completed-topic debriefs remain readable after later-topic failure.
+Private exceptions are sanitized in current and historical client error paths.
+
+`npm test` now covers frontend evidence, stream validation, session races,
+recovery and topic rules. Local gate: 206 backend tests (205 pass, one live RLS
+skip), 23 frontend tests, TypeScript, lint and production build. The local run
+uses Python 3.12 and Node 24; canonical CI targets remain unchanged.
+
+`npm run preview` in frontend starts a synthetic loopback API with all public
+service URLs overridden locally. It requires `backend/.venv` dependencies and
+never imports the real backend application. See README for test credentials.
+Never deploy the harness or use it to claim model quality or RLS verification.
+Production frontend builds now require an explicit API URL.
+
 ## Current baseline
 
 - Product: Verdict, an authenticated web application that stress-tests academic papers with an evidence-grounded multi-agent debate.
@@ -18,7 +54,7 @@ Documentation authority:
 3. `System Specs.md` for rationale, phased history, tracked gaps, and the latest citation-overhaul acceptance criteria (especially sections 18, 21, and 22). Its early Phase 1 wording is historical and is not the current implementation boundary.
 4. `walkthroughs/` for historical Phase 1/2 notes only.
 
-`frontend/README.md` is untouched create-next-app boilerplate and is stale. `frontend/CLAUDE.md` only points to the nested `frontend/AGENTS.md`.
+`frontend/README.md` documents the local preview and frontend checks. `frontend/CLAUDE.md` only points to the nested `frontend/AGENTS.md`.
 
 ## What the app does
 
@@ -99,7 +135,7 @@ Operational constraint: worker queues, event hubs, recovery, and the LLM lock ar
 - Final synthesis starts only after every selected round is completed and has exactly one Debrief Card. It is generated once and stored as Markdown.
 - Author mode renders Overall Assessment, Preserved Strengths, Priority Revisions, Open Judgment Calls, and Revision Plan.
 - Reviewer Assist renders Strengths, Weaknesses, Questions for Authors, and Recommendation.
-- Downloading Markdown reads the stored report; it does not invoke an LLM. PDF report export is not implemented.
+- Downloading Markdown reads the stored report; it does not invoke an LLM. Server PDF report generation is not implemented; browser print/save-as-PDF styling is available.
 - A revision upload can start from any owned family member, but the backend links it to the root and safely allocates the next version number. Comparison audits must be completed, belong to an earlier version of the same family, and share at least one topic.
 - Version diffs compare stored verdict sets per shared topic and render Resolved Issues, Still Open, New Issues, and Summary. They are LLM summaries, not deterministic claim matching. Rows are idempotent per old audit/new audit/topic.
 - The core audit is committed as completed before optional comparison generation. A diff failure must not turn a successful audit into an error. The Final Report view can retry only missing diffs without rerunning the debate.
@@ -114,8 +150,8 @@ Commit `686eba3` is the most recent implementation and the first place to look f
 - It makes exactly one batched Groq request using `openai/gpt-oss-120b`, then derives stable server-owned IDs `ref-1`, `ref-2`, etc. It accepts at most 200 entries and bounds the input reference block at 240,000 characters.
 - This is deliberately optional after the relevance gate. No heading, a Groq outage, malformed model output, or provider/token limit degrades to `reference_list=[]`; it must not fail an otherwise valid upload.
 - Migration 005 makes `papers.reference_list` a non-null JSON array with default `[]`. Ingestion has a compatibility fallback that drops only this optional column when an older database lacks it.
-- Migration 005 backfills existing papers to `[]`; it does not retroactively extract their bibliographies. Re-upload an old paper to exercise the new feature. Neither the paper API response nor the UI exposes reference count/extraction warnings, so direct database inspection or logs are currently required.
-- Important diagnostic nuance: `/ready` currently verifies the Phase 3 schema and private bucket, but does not check `papers.reference_list`. A 200 from `/ready` does not prove migration 005 is applied. Verify the column or upload/read a known bibliography when debugging this feature.
+- Migration 005 backfills existing papers to `[]`; it does not retroactively extract their bibliographies. Re-upload an old paper to exercise the new feature. The paper API/UI still does not expose extraction warnings; new Attacker turn evidence_scope records reference_count. Inspect the database/logs when diagnosing ingestion.
+- `/ready` now checks `papers.reference_list` and every product table, plus private bucket visibility. It proves schema availability, not successful bibliography extraction; upload/read a known bibliography to verify behavior.
 
 ### The two citation paths
 
@@ -158,10 +194,10 @@ Known limitations/watch items, not regressions by themselves:
 - Reference extraction is one Groq call and intentionally fails open to an empty list; very large bibliographies and provider TPM limits need real-world monitoring.
 - The 0.45 external relevance threshold has not been calibrated on a labeled cross-domain dataset. Scores near the boundary should not be overstated.
 - External relevance uses only the current top-five retrieved chunks (up to 8,000 characters), while identity is primarily a fuzzy title match rather than DOI/author/year confirmation. Both are known false-positive/false-negative risks.
-- Completed external-search sweeps are held in an unbounded process cache with no TTL; even a complete empty result remains until restart. Partial sweeps are deliberately not cached.
-- `AuditArena.tsx` currently labels the accepted validation `similarity_score` as “Overlap Similarity,” but the citation overhaul repurposed it as embedding relevance between paper context and the matched external work. Treat that wording as a known UI bug, not a backend scoring bug.
+- Completed external sweeps use a bounded 256-entry LRU cache with 900-second positive/60-second negative TTLs. Partial sweeps are deliberately not cached.
+- The citation UI now describes title existence and broad topical relevance, with explicit limits on claim support; it no longer calls the score overlap similarity.
 - Exhaustive multi-topic audits have not been production load-tested against free-tier quotas.
-- There is no frontend unit/component/E2E test suite. Citation UI behavior currently has static typing, lint/build checks, and backend contract tests but should receive regression coverage when fixed or extended.
+- Frontend unit tests cover evidence matching, citation states, malformed streams, session races and navigation. Automated component/E2E coverage is still missing; use the synthetic browser preview for interaction checks.
 
 When debugging the latest feature, inspect in this order:
 
@@ -175,7 +211,7 @@ When debugging the latest feature, inspect in this order:
 
 ### Frontend (`frontend/`)
 
-- Stack: Next.js `16.3.0` App Router, React `19.2.8`, TypeScript 5 strict mode, Porsche Design System React components, Tailwind/PostCSS 4, Inter variable font, Supabase JS, `react-markdown` + GFM.
+- Stack: Next.js `16.3.4` App Router, React `19.2.8`, TypeScript 5 strict mode, native HTML controls, Tailwind/PostCSS 4, Inter variable font, Supabase JS, `react-markdown` + GFM.
 - `src/app/page.tsx`: authenticated state machine, navigation, upload/launch, recovery, history, and revision setup; `globals.css` owns most layout/theme styling.
 - `src/components/AuthProvider.tsx` and `AuthScreen.tsx`: session lifecycle and email/password UI.
 - `AuditSetup.tsx`: file/config/revision selection; `AuditArena.tsx`: topic tabs, PDF/transcript, citation badges, verdicts, and debriefs.
@@ -202,10 +238,10 @@ Before any frontend edit, read and obey `frontend/AGENTS.md`. This Next.js versi
 ### Deployment and CI
 
 - `render.yaml`: single free Render backend, Python 3.12.11, `/ready` health gate, exact stable frontend origin, and project-scoped Vercel preview regex.
-- Frontend deployment is Vercel, but project linkage and Vercel environment settings live outside Git. `frontend/src/lib/api.ts` falls back in production to `https://verdict-backend-dw29.onrender.com`; `NEXT_PUBLIC_API_URL` is not required by the env validator, so set it explicitly to avoid a new deployment silently calling the old backend.
+- Frontend deployment is Vercel, but project linkage and Vercel environment settings live outside Git. `frontend/src/lib/api.ts` uses an explicit public API URL; production env validation requires it, preventing silent calls to the old deployed backend.
 - There is no migration runner in Render or the repository. `render.yaml` does not apply SQL; Supabase migrations are a separate deployment step.
 - `.github/workflows/phase3-release-gate.yml`: Python compile + full backend suite and frontend `npm ci`, lint, and build on PRs and pushes to `main`.
-- `scripts/verify_phase3_deployment.py`: read-only deployed smoke test for release identity, readiness, OpenAPI/auth, optional CORS/frontend availability, and optional authenticated list access. It does not prove commit `686eba3`, migration 005, or bibliography behavior; `/health` remained version `0.3.0` across the overhaul.
+- `scripts/verify_phase3_deployment.py`: read-only deployed smoke test for release identity, readiness, OpenAPI/auth, optional CORS/frontend availability, and optional authenticated list access. Against this local backend it checks migration-005 schema readiness, but does not prove a particular deployed commit or bibliography behavior; `/health` remained version `0.3.0` across the overhaul.
 
 ## API surface
 
@@ -214,7 +250,7 @@ Only `GET /health` and `GET /ready` are public application endpoints. FastAPI's 
 | Method | Route | Behavior |
 |---|---|---|
 | GET | `/health` | Cheap liveness and version/phase identity; no dependency checks |
-| GET | `/ready` | Cached Phase 3 database/private-storage readiness; not a migration-005 proof |
+| GET | `/ready` | Cached database/private-storage readiness including migration 005 |
 | POST | `/papers?force=&parent_paper_id=` | Validate, classify, extract/index, store, or create a linked revision |
 | GET | `/papers` | List owned papers and versions, newest first |
 | GET | `/papers/{paper_id}/pdf-url` | Return an owned five-minute signed URL |
@@ -230,7 +266,7 @@ Only `GET /health` and `GET /ready` are public application endpoints. FastAPI's 
 | GET | `/audits/{audit_id}/version-diffs?compare_to=` | Stored comparisons |
 | POST | `/audits/{audit_id}/version-diffs?compare_to=` | Idempotently fill missing comparisons; never rerun debate |
 
-The Phase 1/2 `round_topic` input and singular `round_id` response remain compatibility aliases. Anonymous `X-Session-Id`, OAuth, API keys, `/v1` routes, delete endpoints, institutional APIs, and PDF export are not implemented.
+The Phase 1/2 `round_topic` input and singular `round_id` response remain compatibility aliases. Anonymous `X-Session-Id`, OAuth, API keys, `/v1` routes, delete endpoints, institutional APIs, and server-generated PDF export are not implemented.
 
 ## Persistence and security boundaries
 
@@ -291,6 +327,7 @@ python -m unittest discover -s tests -v
 
 ```bash
 cd frontend
+npm test
 npm run lint
 npm run build
 ```

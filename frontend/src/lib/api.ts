@@ -6,7 +6,10 @@
  * not surface as false audit failures.
  */
 
+import { isTurnsResponse, isDebrief, isFinalReport, isVersionDiff, arrayOf } from "./audit-stream";
 import { getSupabaseBrowserClient } from "./supabase";
+import { ApiError, createAuthenticatedFetch } from "./session-fetch";
+export { ApiError } from "./session-fetch";
 import type {
   AuditCreateRequest,
   AuditCreateResponse,
@@ -21,14 +24,10 @@ import type {
 } from "@/types";
 
 const LOCAL_API_BASE = "http://localhost:8000";
-const PRODUCTION_API_BASE = "https://verdict-backend-dw29.onrender.com";
 
 function resolveApiBase(): string {
   const configuredBase = process.env.NEXT_PUBLIC_API_URL?.trim();
-  const fallback = process.env.NODE_ENV === "production"
-    ? PRODUCTION_API_BASE
-    : LOCAL_API_BASE;
-  return (configuredBase || fallback).replace(/\/+$/, "");
+  return (configuredBase || LOCAL_API_BASE).replace(/\/+$/, "");
 }
 
 const API_BASE = resolveApiBase();
@@ -38,7 +37,7 @@ interface ErrorPayload {
   message?: unknown;
 }
 
-let refreshPromise: Promise<string | null> | null = null;
+const authenticatedFetch = createAuthenticatedFetch(() => getSupabaseBrowserClient().auth);
 
 export class UploadError extends Error {
   relevanceFailed: boolean;
@@ -59,16 +58,6 @@ export class UploadError extends Error {
   }
 }
 
-export class ApiError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-  }
-}
-
 function objectValue(value: unknown, key: string): unknown {
   if (typeof value !== "object" || value === null) return undefined;
   return (value as Record<string, unknown>)[key];
@@ -85,68 +74,6 @@ async function readErrorPayload(response: Response): Promise<ErrorPayload> {
   return response.json().catch(() => ({ detail: response.statusText }));
 }
 
-async function currentAccessToken(): Promise<string | null> {
-  const { data, error } = await getSupabaseBrowserClient().auth.getSession();
-  if (error) throw new ApiError(error.message, 401);
-  return data.session?.access_token ?? null;
-}
-
-async function refreshedAccessToken(): Promise<string | null> {
-  if (!refreshPromise) {
-    refreshPromise = getSupabaseBrowserClient().auth
-      .refreshSession()
-      .then(({ data, error }) => {
-        if (error) return null;
-        return data.session?.access_token ?? null;
-      })
-      .finally(() => {
-        refreshPromise = null;
-      });
-  }
-  return refreshPromise;
-}
-
-async function endInvalidLocalSession(): Promise<void> {
-  try {
-    await getSupabaseBrowserClient().auth.signOut({ scope: "local" });
-  } catch {
-    // The request still fails closed below. Supabase will reconcile its local
-    // session on the next auth event or page load if sign-out is unavailable.
-  }
-}
-
-function requestWithToken(
-  input: string,
-  init: RequestInit,
-  accessToken: string,
-): Promise<Response> {
-  const requestHeaders = new Headers(init.headers);
-  requestHeaders.set("Authorization", `Bearer ${accessToken}`);
-  return fetch(input, { ...init, headers: requestHeaders });
-}
-
-async function authenticatedFetch(
-  input: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  const accessToken = await currentAccessToken();
-  if (!accessToken) {
-    throw new ApiError("Sign in to continue.", 401);
-  }
-
-  let response = await requestWithToken(input, init, accessToken);
-  if (response.status !== 401) return response;
-
-  const refreshedToken = await refreshedAccessToken();
-  if (refreshedToken) {
-    response = await requestWithToken(input, init, refreshedToken);
-    if (response.status !== 401) return response;
-  }
-
-  await endInvalidLocalSession();
-  return response;
-}
-
 async function responseError(response: Response, fallback: string): Promise<ApiError> {
   const payload = await readErrorPayload(response);
   return new ApiError(
@@ -155,12 +82,14 @@ async function responseError(response: Response, fallback: string): Promise<ApiE
   );
 }
 
-async function getJson<T>(path: string, fallback: string): Promise<T> {
+async function getJson<T>(path: string, fallback: string, guard?: (value: unknown) => value is T): Promise<T> {
   const response = await authenticatedFetch(`${API_BASE}${path}`, {
     cache: "no-store",
   });
   if (!response.ok) throw await responseError(response, fallback);
-  return response.json() as Promise<T>;
+  const value: unknown = await response.json();
+  if (guard && !guard(value)) throw new ApiError("The service returned an invalid saved artifact. Please retry.", 502);
+  return value as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +205,7 @@ export async function fetchTurns(auditId: string): Promise<TurnsListResponse> {
   return getJson<TurnsListResponse>(
     `/audits/${encodeURIComponent(auditId)}/turns`,
     "Failed to fetch audit state",
+    isTurnsResponse,
   );
 }
 
@@ -301,6 +231,7 @@ export async function fetchDebriefs(auditId: string): Promise<DebriefCard[]> {
   return getJson<DebriefCard[]>(
     `/audits/${encodeURIComponent(auditId)}/debriefs`,
     "Failed to fetch audit debriefs",
+    arrayOf(isDebrief),
   );
 }
 
@@ -308,6 +239,7 @@ export async function fetchFinalReport(auditId: string): Promise<FinalReport> {
   return getJson<FinalReport>(
     `/audits/${encodeURIComponent(auditId)}/final-report`,
     "Failed to fetch final report",
+    isFinalReport,
   );
 }
 
@@ -321,6 +253,7 @@ export async function fetchVersionDiffs(
   return getJson<VersionDiff[]>(
     `/audits/${encodeURIComponent(auditId)}/version-diffs${query}`,
     "Failed to fetch version comparison",
+    arrayOf(isVersionDiff),
   );
 }
 
@@ -341,7 +274,9 @@ export async function retryVersionDiffs(
       `Failed to retry version comparison (${response.status})`,
     );
   }
-  return response.json() as Promise<VersionDiff[]>;
+  const value: unknown = await response.json();
+  if (!arrayOf(isVersionDiff)(value)) throw new ApiError("The service returned an invalid revision comparison.", 502);
+  return value;
 }
 
 export async function fetchFinalReportMarkdown(auditId: string): Promise<Blob> {

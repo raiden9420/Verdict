@@ -24,9 +24,12 @@ interface AuthContextValue {
   user: User | null;
   loading: boolean;
   configurationError: string | null;
+  passwordRecovery: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<SignUpResult>;
   signOut: () => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
+  updatePassword: (password: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -35,6 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const configurationError = getSupabaseConfigurationError();
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(configurationError === null);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   useEffect(() => {
     if (configurationError) {
@@ -45,11 +49,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = getSupabaseBrowserClient();
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange((event, nextSession) => {
       // Keep this callback synchronous. Calling another auth method from inside
       // it can deadlock the Supabase auth client's internal session lock.
       if (!active) return;
       setSession(nextSession);
+      if (event === "PASSWORD_RECOVERY") setPasswordRecovery(true);
+      if (event === "SIGNED_OUT") setPasswordRecovery(false);
       setLoading(false);
     });
 
@@ -57,6 +63,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!active) return;
       setSession(error ? null : data.session);
       setLoading(false);
+    }).catch(() => {
+      if (active) setLoading(false);
     });
 
     return () => {
@@ -88,17 +96,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw error;
   }, []);
 
+  const requestPasswordReset = useCallback(async (email: string) => {
+    const { error } = await getSupabaseBrowserClient().auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/`,
+    });
+    if (error) throw error;
+  }, []);
+
+  const updatePassword = useCallback(async (password: string) => {
+    const { error } = await getSupabaseBrowserClient().auth.updateUser({ password });
+    if (error) throw error;
+    setPasswordRecovery(false);
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       session,
       user: session?.user ?? null,
       loading,
       configurationError,
+      passwordRecovery,
       signIn,
       signUp,
       signOut,
+      requestPasswordReset,
+      updatePassword,
     }),
-    [configurationError, loading, session, signIn, signOut, signUp],
+    [configurationError, loading, passwordRecovery, session, signIn, signOut, signUp, requestPasswordReset, updatePassword],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

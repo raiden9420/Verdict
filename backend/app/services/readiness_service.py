@@ -2,14 +2,14 @@
 
 The liveness endpoint only proves that the Python process can answer requests.
 This module additionally verifies the schema that the Phase 3 API requires and
-that the papers bucket is private. A successful result is cached for the life
-of the process; failures are never cached, so applying a migration allows a
-waiting deployment to become ready without a restart.
+that the papers bucket is private. Successful checks are cached briefly to
+avoid excess probe traffic; failures invalidate that cache and are never cached.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,10 +22,20 @@ PRODUCT_PHASE = 3
 _REQUIRED_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "papers": (
         "id",
+        "filename",
+        "storage_path",
+        "page_count",
+        "uploaded_at",
+        "embedding_space",
+        "reproducibility_signals",
+        "reference_list",
         "user_id",
         "parent_paper_id",
         "version_number",
         "detected_domain",
+    ),
+    "chunks": (
+        "id", "paper_id", "section", "text", "embedding", "page_number", "chunk_index",
     ),
     "audits": (
         "id",
@@ -35,14 +45,31 @@ _REQUIRED_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "depth",
         "mode",
         "domain",
+        "round_topic",
+        "status",
+        "error_message",
+        "created_at",
     ),
-    "final_reports": ("id", "audit_id", "mode", "content"),
+    "rounds": ("id", "audit_id", "round_number", "topic", "status"),
+    "turns": (
+        "id", "round_id", "exchange_number", "agent_type", "sequence", "content", "created_at",
+    ),
+    "verdicts": (
+        "id", "round_id", "exchange_number", "claim_summary", "verdict_type",
+        "confidence", "rationale", "cited_chunk_ids",
+    ),
+    "debrief_cards": (
+        "id", "round_id", "executive_synthesis", "solidified_strengths",
+        "actionable_weaknesses", "contested_points", "created_at",
+    ),
+    "final_reports": ("id", "audit_id", "mode", "content", "created_at"),
     "version_diffs": (
         "id",
         "audit_id_old",
         "audit_id_new",
         "round_topic",
         "diff_summary",
+        "created_at",
     ),
 }
 
@@ -55,7 +82,8 @@ class ReadinessError(RuntimeError):
         self.component = component
 
 
-_ready = False
+_READINESS_CACHE_TTL_SECONDS = 30
+_ready_until = 0.0
 _ready_lock = threading.Lock()
 
 
@@ -67,14 +95,16 @@ def _value(item: Any, field: str) -> Any:
 
 def verify_phase3_readiness(*, force: bool = False) -> None:
     """Raise :class:`ReadinessError` until the deployed schema is usable."""
-    global _ready
-    if _ready and not force:
+    global _ready_until
+    if not force and time.monotonic() < _ready_until:
         return
 
     with _ready_lock:
-        if _ready and not force:
+        if not force and time.monotonic() < _ready_until:
             return
 
+        # A failed forced probe must invalidate even a still-fresh success.
+        _ready_until = 0.0
         try:
             client = get_service_supabase()
             for table, columns in _REQUIRED_TABLE_COLUMNS.items():
@@ -100,11 +130,11 @@ def verify_phase3_readiness(*, force: bool = False) -> None:
                 "The private papers storage bucket is unavailable.",
             ) from exc
 
-        _ready = True
+        _ready_until = time.monotonic() + _READINESS_CACHE_TTL_SECONDS
 
 
 def reset_readiness_cache() -> None:
     """Reset the process cache for tests and explicit operational probes."""
-    global _ready
+    global _ready_until
     with _ready_lock:
-        _ready = False
+        _ready_until = 0.0

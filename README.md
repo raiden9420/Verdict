@@ -1,9 +1,9 @@
-# Verdict — Adversarial Research Audits
+# Verdict — Evidence-led Research Review
 
 Verdict stress-tests research papers through an evidence-grounded debate. For
 each selected review topic, an Attacker critiques the manuscript, a Defender
 responds from the paper itself, a deterministic Validator checks every cited
-chunk, and a Referee issues a confidence-scored verdict. Three exchanges form
+chunk, and a Referee records a ruling and its rationale. Three exchanges form
 one round; each round receives its own Debrief Card, and all selected rounds are
 then synthesized into a paper-level report.
 
@@ -11,6 +11,101 @@ Phase 3 adds authenticated accounts, database-enforced ownership, configurable
 multi-topic audits, domain-aware review standards, author/reviewer report modes,
 Markdown export, and comparison across paper revisions. The trust-critical
 inner debate cycle remains unchanged.
+
+## September 2026 product overhaul
+
+The workspace now leads with findings and their source passages. Open a finding
+for the challenge, defense, ruling, and recorded model provenance. Topic counts
+are not a paper score. Model confidence is explicitly uncalibrated; a topical
+citation match does not prove support for a particular in-text claim.
+
+- A public `/example` shows a clearly fictional manuscript and three worked
+  findings without an account or model call.
+- Reuse prepared papers from the searchable library; navigation has URL state,
+  browser back/forward, and saved-audit recovery.
+- Email/password sign-in includes password reset/recovery. Add the exact local
+  or deployed frontend URL to Supabase's allowed redirects for recovery links.
+- Export the saved report as Markdown, print/save it as PDF through the browser,
+  or export the loaded review record as JSON. JSON includes the current scope,
+  findings and recorded provenance; it is not a cryptographically signed record.
+- New final reports append a deterministic finding register with stored rulings
+  and owned source references. Existing saved reports are not regenerated.
+- Source URLs renew before expiry. Completed-topic cards remain accessible when
+  a later topic fails. Invalid live/saved artifact payloads enter recovery rather
+  than reaching the renderer.
+- Bibliography entries must match extracted source text. Topic-specific retrieval,
+  duplicate-challenge rejection, and bounded source context reduce avoidable
+  repetition and unsupported omission claims.
+- `/ready` now checks every product table, `papers.reference_list` (migration
+  005), and the private bucket. Successful checks expire after 30 seconds.
+
+No migration was added for this overhaul: provenance and adjudication metadata
+use the existing turn-content JSON. Deployments still require the separate
+database and environment checks documented below.
+
+## Review locally without credentials
+
+Dependencies are installed in this working copy. From the repository root,
+`./scripts/preview-local.sh` also works when Node is only available through the
+Codex Desktop runtime. With Node on your PATH, from `frontend/` run:
+
+```bash
+npm run preview
+```
+
+Open `http://127.0.0.1:3000` and sign in with **preview@example.test** /
+**preview-only**. The script starts a loopback-only, in-memory API on port 8765
+and Next on port 3000, overriding all public service URLs. No Supabase, model,
+or literature service is called. Stop with Ctrl-C; synthetic records reset.
+This harness demonstrates UI/transport behavior, not model quality or RLS.
+Do not deploy `scripts/preview_server.py` or use real documents in this harness.
+The same illustrative findings are reused when testing multiple topics.
+
+On a fresh checkout, first create `backend/.venv`, install
+`backend/requirements.txt`, and run `npm ci` in `frontend/`. For actual reviews,
+follow the separate backend/frontend setup below with a dedicated development
+Supabase project and real provider keys. **Do not start a development backend
+against production while an audit is running:** startup recovery assumes one
+backend process owns all active work.
+
+## Local verification
+
+```bash
+cd backend
+.venv/bin/python -m compileall -q app tests ../scripts
+.venv/bin/python -m unittest discover -s tests -v
+cd ../frontend
+npm test
+npm run lint
+npm run build
+```
+
+A production build requires explicit `NEXT_PUBLIC_API_URL`,
+`NEXT_PUBLIC_SUPABASE_URL`, and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`; there is
+no fallback to the deployed Verdict backend. Use public values only.
+
+The local gate on September 9 ran 206 backend tests (205 passed, one opt-in
+live RLS test skipped), 23 frontend tests, TypeScript, lint, and a production
+build. Local browser checks used synthetic data, including streamed review,
+paper reuse, exports, page navigation, back/forward, reload recovery and phone
+layouts. Live model quality, email delivery, real RLS and production quotas
+still need a separate integration evaluation. Python 3.12 and Node 24 were used
+locally; CI retains Python 3.12.11 and Node 20.x.
+
+## Before paid, unattended use
+
+The useful distinction is a durable, inspectable sequence of challenges,
+paper-grounded responses and revision decisions. Multiple roles may still use
+the same model; the architecture alone does not demonstrate better scientific
+judgment than a strong single-model review.
+
+Prioritize a blinded research-paper benchmark against that baseline, with
+expert ratings of false accusations, missed issues, actionable findings and
+source support. Then add per-account quotas and cost accounting, durable worker
+ownership/recovery, deletion/retention controls and tested billing entitlements.
+Calibration and claim-to-cited-source accuracy remain open work. The current
+single-process executor must not be horizontally scaled unchanged. This local
+version is intended for supervised pilot testing, not an unattended paid launch.
 
 ## Features
 
@@ -24,12 +119,11 @@ inner debate cycle remains unchanged.
   - `reproducibility`
   - `limitations_impact`
   - `statistical_rigor`
-- Three strictness levels: Constructive Peer, Standard Reviewer, and Brutal
-  Adversary.
+- Three scrutiny levels: Constructive, Standard, and Exacting.
 - Three depth levels. Depth controls topic breadth—not exchanges per round:
-  - Fast: 1–2 topics
-  - Deep: 3–4 topics
-  - Exhaustive: 5–6 topics
+  - Focused (`fast`): 1–2 topics
+  - Extended (`deep`): 3–4 topics
+  - Full scope (`exhaustive`): 5–6 topics
 - Domain detection in the existing relevance-classification call, with a user
   override for ML/CS, life sciences, social science, or general research.
 - Domain-specific deterministic reproducibility checks, including database
@@ -40,7 +134,7 @@ inner debate cycle remains unchanged.
 - Linked paper revisions and LLM-summarized, per-topic comparisons of resolved,
   open, and new issues.
 - Phase 2 behavior remains intact: external literature grounding for novelty and
-  experimental topics, overlap detection, statistical rigor, multi-provider
+  experimental topics, title/relevance checks, statistical rigor, multi-provider
   fallback, and low-confidence self-consistency checks.
 
 ## Architecture
@@ -76,8 +170,8 @@ The backend uses two deliberately separate Supabase credentials:
 
 ## Prerequisites
 
-- Python 3.11+
-- Node.js 20+
+- Python 3.12.11 (the CI/deployment target)
+- Node.js 20.x (the CI/deployment target)
 - A Supabase project with Auth, Postgres, Storage, and pgvector
 - A Gemini API key
 - A Groq API key for bibliography extraction (and provider fallback)
@@ -108,8 +202,8 @@ client bypasses RLS and would make an apparent ownership test meaningless.
 
 ```bash
 cd backend
-python -m venv venv
-source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
@@ -148,7 +242,7 @@ replace it with a broad `*.vercel.app` rule when credentials are enabled.
 
 ```bash
 cd frontend
-npm install
+npm ci
 cp .env.example .env.local
 ```
 

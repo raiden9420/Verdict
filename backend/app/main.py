@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         # A transient database outage should not prevent the health endpoint
         # from starting; audit creation will still fail closed until DB recovers.
-        logger.warning("Could not reconcile interrupted audits at startup: %s", exc)
+        logger.warning("Could not reconcile interrupted audits at startup (%s)", type(exc).__name__)
     logger.info("Verdict backend started ✓")
     yield
     # Shutdown

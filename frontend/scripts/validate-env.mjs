@@ -26,6 +26,7 @@ loadLocalEnv(".env.local");
 loadLocalEnv(".env");
 
 const required = [
+  "NEXT_PUBLIC_API_URL",
   "NEXT_PUBLIC_SUPABASE_URL",
   "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
 ];
@@ -33,6 +34,13 @@ const missing = required.filter((key) => !process.env[key]?.trim());
 if (missing.length) {
   console.error(`Missing required frontend environment variables: ${missing.join(", ")}`);
   process.exit(1);
+}
+
+let apiUrl;
+try { apiUrl = new URL(process.env.NEXT_PUBLIC_API_URL.trim()); }
+catch { console.error("NEXT_PUBLIC_API_URL must be a valid URL."); process.exit(1); }
+if (!["https:", "http:"].includes(apiUrl.protocol) || (apiUrl.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(apiUrl.hostname)) || apiUrl.username || apiUrl.password) {
+  console.error("NEXT_PUBLIC_API_URL must use HTTPS outside local development and must not contain credentials."); process.exit(1);
 }
 
 let supabaseUrl;

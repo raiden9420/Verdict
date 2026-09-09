@@ -178,6 +178,21 @@ class ReportRenderingTests(unittest.TestCase):
 
 
 class FinalReportServiceTests(unittest.TestCase):
+    @staticmethod
+    def add_adjudications(database: SupabaseStub) -> None:
+        database.tables["verdicts"] = [
+            {
+                "round_id": round_row["id"],
+                "exchange_number": exchange,
+                "claim_summary": f"Concern {exchange} for {round_row['topic']}",
+                "verdict_type": "CONTESTED",
+                "rationale": "A directly traceable stored judgment.",
+                "cited_chunk_ids": [],
+            }
+            for round_row in database.tables["rounds"]
+            for exchange in range(1, 4)
+        ]
+
     def test_author_mode_selects_author_schema_and_coaching_output(self) -> None:
         audit_id = "audit-author"
         database = SupabaseStub(
@@ -212,6 +227,7 @@ class FinalReportServiceTests(unittest.TestCase):
                 "final_reports": [],
             }
         )
+        self.add_adjudications(database)
         generated = (
             {
                 "overall_assessment": "Promising with a focused revision.",
@@ -388,6 +404,7 @@ class FinalReportServiceTests(unittest.TestCase):
                 "final_reports": [],
             }
         )
+        self.add_adjudications(database)
         generated = (
             {
                 "strengths": ["Sound proof."],

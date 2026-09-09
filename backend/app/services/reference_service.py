@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Sequence
 from typing import Any
 
@@ -169,18 +170,6 @@ def _clean_authors(value: object) -> list[str]:
     return authors
 
 
-def _clean_year(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        year = value
-    elif isinstance(value, str) and re.fullmatch(r"\d{4}", value.strip()):
-        year = int(value.strip())
-    else:
-        return None
-    return year if 1000 <= year <= 2999 else None
-
-
 def _title_start(raw_text: str, title: str) -> int | None:
     """Locate a model-normalized title inside its raw entry, punctuation-insensitively."""
     direct = raw_text.casefold().find(title.casefold())
@@ -248,8 +237,16 @@ def _derive_authors_and_year(raw_text: str, title: str) -> tuple[list[str], int 
     return _clean_authors(author_credit), year
 
 
-def _normalize_response(result: object) -> list[dict[str, Any]]:
-    """Validate the untrusted model payload and assign server-owned stable IDs."""
+def _source_key(value: str) -> str:
+    """Ignore PDF wraps, ligatures and punctuation without inventing words."""
+    return "".join(
+        character for character in unicodedata.normalize("NFKC", value).casefold()
+        if character.isalnum()
+    )
+
+
+def _normalize_response(result: object, reference_block: str) -> list[dict[str, Any]]:
+    """Anchor every entry and title to the source before assigning stable IDs."""
     if not isinstance(result, dict):
         raise ValueError("Reference structurer returned an invalid top-level response")
     compact_wire = isinstance(result.get("r"), list)
@@ -259,6 +256,7 @@ def _normalize_response(result: object) -> list[dict[str, Any]]:
 
     references: list[dict[str, Any]] = []
     seen_raw_text: set[str] = set()
+    source_key = _source_key(reference_block)
     for candidate in candidates[:_MAX_REFERENCES]:
         if not isinstance(candidate, dict):
             continue
@@ -272,16 +270,22 @@ def _normalize_response(result: object) -> list[dict[str, Any]]:
         )
         if not raw_text or not title:
             continue
-        raw_key = raw_text.casefold()
+        raw_key = _source_key(raw_text)
+        title_key = _source_key(title)
+        # A model-generated ref-N is not provenance. Both the complete entry
+        # and its extracted title must occur in the actual bibliography. This
+        # also rejects a plausible title attached to the wrong real entry.
+        if not raw_key or len(title_key) < 3 or raw_key not in source_key or title_key not in raw_key:
+            logger.warning("Discarded a bibliography entry that could not be anchored to the source")
+            continue
         if raw_key in seen_raw_text:
             continue
         seen_raw_text.add(raw_key)
         index = len(references) + 1
-        if compact_wire:
-            authors, year = _derive_authors_and_year(raw_text, title)
-        else:
-            authors = _clean_authors(candidate.get("authors"))
-            year = _clean_year(candidate.get("year"))
+        # Legacy wire formats may volunteer extra author/year fields. Derive
+        # these from the anchored entry too, rather than blessing model-added
+        # names or dates as paper-owned metadata.
+        authors, year = _derive_authors_and_year(raw_text, title)
         references.append(
             {
                 "id": f"ref-{index}",
@@ -292,6 +296,10 @@ def _normalize_response(result: object) -> list[dict[str, Any]]:
                 "year": year,
             }
         )
+    references.sort(key=lambda entry: source_key.index(_source_key(entry["raw_text"])))
+    for index, entry in enumerate(references, start=1):
+        entry["id"] = f"ref-{index}"
+        entry["index"] = index
     return references
 
 
@@ -345,7 +353,7 @@ def structure_reference_block(
         '{"r":[{"x":"complete source entry","t":"cited work title"}]}\n'
         "Include every entry. Do not abbreviate x, and do not add commentary."
     )
-    return _normalize_response(client.generate(system_prompt, user_prompt))
+    return _normalize_response(client.generate(system_prompt, user_prompt), reference_block)
 
 
 def extract_reference_list(
@@ -360,7 +368,7 @@ def extract_reference_list(
     try:
         references = structure_reference_block(reference_block, client=client)
     except Exception as exc:
-        logger.warning("Reference-list extraction degraded to an empty list: %s", exc)
+        logger.warning("Reference-list extraction degraded to an empty list: %s", type(exc).__name__)
         return []
     logger.info("Extracted %d structured bibliography entries", len(references))
     return references

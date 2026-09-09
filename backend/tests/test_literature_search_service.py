@@ -104,7 +104,6 @@ class ReferencedCandidateFilteringTests(unittest.TestCase):
 class SearchAvailabilityTests(unittest.TestCase):
     def setUp(self) -> None:
         literature_search_service._SEARCH_CACHE.clear()
-        literature_search_service._SEARCH_STATUS_CACHE.clear()
 
     def test_incomplete_search_reports_status_and_is_not_cached(self) -> None:
         with (
@@ -131,10 +130,9 @@ class SearchAvailabilityTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(successful_sources, 1)
-        self.assertNotIn("a deliberately absent title", literature_search_service._SEARCH_CACHE)
+        self.assertNotIn(("a deliberately absent title", 5), literature_search_service._SEARCH_CACHE)
 
         literature_search_service._SEARCH_CACHE.clear()
-        literature_search_service._SEARCH_STATUS_CACHE.clear()
         with (
             patch.object(
                 literature_search_service,
@@ -159,7 +157,7 @@ class SearchAvailabilityTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(successful_sources, 0)
-        self.assertNotIn("provider outage title", literature_search_service._SEARCH_CACHE)
+        self.assertNotIn(("provider outage title", 5), literature_search_service._SEARCH_CACHE)
 
     def test_complete_empty_search_is_cached_as_conclusive(self) -> None:
         with (
@@ -174,7 +172,7 @@ class SearchAvailabilityTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(successful_sources, LITERATURE_SOURCE_COUNT)
-        self.assertIn("a title absent from every provider", literature_search_service._SEARCH_CACHE)
+        self.assertIn(("a title absent from every provider", 5), literature_search_service._SEARCH_CACHE)
 
 
 if __name__ == "__main__":

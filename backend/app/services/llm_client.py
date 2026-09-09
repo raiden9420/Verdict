@@ -30,6 +30,7 @@ AgentSchema = TypeVar("AgentSchema", bound=BaseModel)
 SCHEMA_VALIDATION_RETRIES = 3
 _TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 _MAX_PROVIDER_RETRY_DELAY_SECONDS = 60
+_GEMINI_REQUEST_TIMEOUT_MS = 45_000
 _RETRY_AFTER_DURATION_RE = re.compile(
     r"try\s+again\s+in\s+(?:(?P<minutes>\d+(?:\.\d+)?)m)?"
     r"(?P<seconds>\d+(?:\.\d+)?)s",
@@ -157,11 +158,13 @@ def _generate_openai_compatible(
                     )
                     continue
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
-            last_exc = RuntimeError(f"{provider_name} API error {exc.code}: {body}")
-            logger.warning("%s API HTTP error %d: %s", provider_name, exc.code, body)
+            # Provider bodies may echo submitted private text or credentials.
+            # Inspect only for retry timing; never propagate or log the body.
+            body = exc.read(65_536).decode("utf-8", errors="ignore")
+            last_exc = RuntimeError(f"{provider_name} API returned HTTP {exc.code}")
+            logger.warning("%s API HTTP error %d", provider_name, exc.code)
             if not _is_transient_provider_error(exc):
-                raise last_exc from exc
+                raise last_exc from None
             provider_retry_delay = _provider_retry_delay(exc, body)
         except Exception as exc:
             last_exc = exc
@@ -169,13 +172,13 @@ def _generate_openai_compatible(
                 exc,
                 (json.JSONDecodeError, KeyError, IndexError, TypeError),
             ):
-                raise RuntimeError(f"{provider_name} API call failed: {exc}") from exc
+                raise RuntimeError(f"{provider_name} API call failed ({type(exc).__name__})") from None
             logger.warning(
                 "Transient or malformed %s response (attempt %d/%d): %s",
                 provider_name,
                 attempt + 1,
                 LLM_MAX_RETRIES,
-                exc,
+                type(exc).__name__,
             )
 
         if attempt < LLM_MAX_RETRIES - 1:
@@ -190,8 +193,8 @@ def _generate_openai_compatible(
             time.sleep(delay)
 
     raise RuntimeError(
-        f"{provider_name} LLM call failed after {LLM_MAX_RETRIES} attempts: {last_exc}"
-    ) from last_exc
+        f"{provider_name} LLM call failed after {LLM_MAX_RETRIES} attempts ({type(last_exc).__name__})"
+    ) from None
 
 
 
@@ -221,7 +224,10 @@ class GeminiClient(LLMClient):
     """
 
     def __init__(self) -> None:
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        self.client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=_GEMINI_REQUEST_TIMEOUT_MS),
+        )
         self.model_name = GEMINI_MODEL
 
     def generate(self, system_prompt: str, user_prompt: str) -> dict:
@@ -283,17 +289,17 @@ class GeminiClient(LLMClient):
                         api_failures,
                         MAX_API_RETRIES,
                         delay,
-                        exc,
+                        type(exc).__name__,
                     )
                     if api_failures < MAX_API_RETRIES:
                         time.sleep(delay)
                 else:
-                    logger.error("Gemini call failed (non-retryable): %s", exc)
-                    raise
+                    logger.error("Gemini call failed (non-retryable): %s", type(exc).__name__)
+                    raise RuntimeError(f"Gemini call failed ({type(exc).__name__})") from None
 
         raise RuntimeError(
-            f"Gemini call failed after {json_failures} JSON retries + {api_failures} API retries: {last_exc}"
-        )
+            f"Gemini call failed after {json_failures} JSON retries + {api_failures} API retries ({type(last_exc).__name__})"
+        ) from None
 
 
 class GroqClient(LLMClient):
@@ -406,19 +412,19 @@ class MultiProviderLLMClient(LLMClient):
             try:
                 self.providers.append(("Gemini", GeminiClient()))
             except Exception as exc:
-                logger.warning("Failed to init Gemini client: %s", exc)
+                logger.warning("Failed to init Gemini client: %s", type(exc).__name__)
 
         if GROQ_API_KEY:
             try:
                 self.providers.append(("Groq", GroqClient()))
             except Exception as exc:
-                logger.warning("Failed to init Groq client: %s", exc)
+                logger.warning("Failed to init Groq client: %s", type(exc).__name__)
 
         if OPENROUTER_API_KEY:
             try:
                 self.providers.append(("OpenRouter", OpenRouterClient()))
             except Exception as exc:
-                logger.warning("Failed to init OpenRouter client: %s", exc)
+                logger.warning("Failed to init OpenRouter client: %s", type(exc).__name__)
 
         if not self.providers:
             logger.error("No LLM providers configured!")
@@ -450,9 +456,9 @@ class MultiProviderLLMClient(LLMClient):
                 return res, client, name
             except Exception as exc:
                 last_error = exc
-                logger.warning("Provider '%s' failed: %s. Trying next provider...", name, exc)
+                logger.warning("Provider '%s' failed (%s). Trying next provider...", name, type(exc).__name__)
 
-        raise RuntimeError(f"All configured LLM providers failed. Last error: {last_error}")
+        raise RuntimeError(f"All configured LLM providers failed ({type(last_error).__name__})") from None
 
     def generate(self, system_prompt: str, user_prompt: str) -> dict:
         res, _, _ = self.generate_with_meta(system_prompt, user_prompt)
@@ -513,11 +519,14 @@ def generate_structured_with_meta(
                 attempt,
                 max_schema_attempts,
                 provider_name,
-                exc,
+                type(exc).__name__,
             )
             if attempt < max_schema_attempts:
                 if isinstance(exc, ValidationError):
-                    details = json.dumps(exc.errors(include_url=False), default=str)
+                    details = json.dumps(
+                        exc.errors(include_url=False, include_input=False, include_context=False),
+                        default=str,
+                    )
                 else:
                     details = str(exc)
                 prompt = (
@@ -530,8 +539,8 @@ def generate_structured_with_meta(
 
     raise RuntimeError(
         f"{output_schema.__name__} generation failed schema validation after "
-        f"{max_schema_attempts} attempts: {last_error}"
-    ) from last_error
+        f"{max_schema_attempts} attempts ({type(last_error).__name__})"
+    ) from None
 
 
 def _repair_json(raw: str) -> dict | None:
@@ -634,7 +643,7 @@ def _try_fix_control_chars(raw: str) -> dict | None:
 
         return json.loads(fixed)
     except (json.JSONDecodeError, Exception) as exc:
-        logger.warning("JSON control-char repair failed: %s", exc)
+        logger.warning("JSON control-char repair failed: %s", type(exc).__name__)
         return None
 
 

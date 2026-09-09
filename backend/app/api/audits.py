@@ -58,6 +58,11 @@ _MAX_PENDING_AUDITS = 4
 _ORPHANED_AUDIT_MESSAGE = (
     "The audit worker restarted before this audit completed. Please launch it again."
 )
+_AUDIT_FAILURE_MESSAGE = (
+    "The audit could not be completed. Completed topic findings are preserved. "
+    "Please launch a new audit to try again."
+)
+_AUDIT_HISTORY_BATCH_SIZE = 100
 
 # One worker preserves the Phase 2 free-tier quota boundary. The semaphore caps
 # the running job plus queued audits without creating unbounded blocked threads.
@@ -68,6 +73,16 @@ _audit_capacity = threading.BoundedSemaphore(_MAX_PENDING_AUDITS)
 # provider pressure while an Exhaustive audit is running.
 _llm_work_lock = threading.Lock()
 _event_loop: asyncio.AbstractEventLoop | None = None
+# Retain shielded admission tasks until they finish even if their HTTP request
+# goes away. A cancelled client must not strand a durable job or its capacity.
+_admission_tasks: set[asyncio.Task[AuditCreateResponse]] = set()
+
+
+def _public_audit_error(message: Any) -> str:
+    """Expose only server-authored errors, including when reading legacy rows."""
+    if message in (_ORPHANED_AUDIT_MESSAGE, _AUDIT_FAILURE_MESSAGE):
+        return str(message)
+    return _AUDIT_FAILURE_MESSAGE
 
 
 @dataclass(frozen=True)
@@ -166,7 +181,7 @@ def _mark_audit_error(
 ) -> None:
     """Persist a terminal failure without exposing provider internals to clients."""
     supabase = get_supabase()
-    safe_message = (message or "Audit failed")[:1000]
+    safe_message = _public_audit_error(message)
     supabase.table("audits").update(
         {"status": "error", "error_message": safe_message}
     ).eq("id", audit_id).execute()
@@ -226,19 +241,14 @@ def _run_audit_job(
             }
         ]
     round_ids = [str(row["id"]) for row in rows]
-    graph_error_message: str | None = None
     required_artifacts_complete = False
 
     def publish_graph_event(event: dict[str, Any]) -> None:
-        nonlocal graph_error_message
         if not isinstance(event, dict):
             return
         event_type = str(event.get("type") or "message")
         data = event.get("data", {})
         if event_type == "error":
-            graph_error_message = str(
-                data.get("message") if isinstance(data, dict) else data
-            )
             return
         if event_type == "complete":
             return
@@ -281,10 +291,7 @@ def _run_audit_job(
                         domain=domain,
                     )
                 if not isinstance(result, dict) or result.get("status") != "completed":
-                    raise RuntimeError(
-                        graph_error_message
-                        or f"Audit round ended in unexpected state: {result!r}"
-                    )
+                    raise RuntimeError("Audit round did not complete")
 
             # Internal Phase 1/2 callers invoked this worker with only one round
             # and no database context. Preserve that seam for regression tests;
@@ -334,7 +341,7 @@ def _run_audit_job(
                 logger.warning(
                     "Version diff for audit %s could not be produced: %s",
                     audit_id,
-                    diff_exc,
+                    type(diff_exc).__name__,
                 )
                 loop.call_soon_threadsafe(
                     _publish_event,
@@ -359,8 +366,8 @@ def _run_audit_job(
                 },
             )
     except Exception as exc:
-        message = graph_error_message or str(exc) or "Audit failed"
-        logger.exception("Audit %s failed: %s", audit_id, exc)
+        message = _AUDIT_FAILURE_MESSAGE
+        logger.error("Audit %s failed (%s)", audit_id, type(exc).__name__)
         if required_artifacts_complete:
             # The rounds, report, and completed status are already durable.
             # A shutting-down event loop (or another post-commit notification
@@ -374,12 +381,12 @@ def _run_audit_job(
             ):
                 _mark_audit_error(audit_id, round_ids, message)
         except Exception as persist_exc:
-            logger.error("Failed to persist audit %s error: %s", audit_id, persist_exc)
+            logger.error("Failed to persist audit %s error (%s)", audit_id, type(persist_exc).__name__)
         loop.call_soon_threadsafe(
             _publish_event,
             audit_id,
             "audit_error",
-            {"status": "error", "message": message[:1000]},
+            {"status": "error", "message": message},
         )
     finally:
         _llm_work_lock.release()
@@ -437,6 +444,9 @@ def _create_audit_rows(
     ]
     inserted_audit = False
     try:
+        # A successful remote insert can lose its response. This request owns
+        # a fresh UUID, so compensation is safe even if no row was inserted.
+        inserted_audit = True
         supabase.table("audits").insert(
             {
                 "id": audit_id,
@@ -453,7 +463,6 @@ def _create_audit_rows(
                 "error_message": None,
             }
         ).execute()
-        inserted_audit = True
         supabase.table("rounds").insert(rows).execute()
         return rows
     except Exception:
@@ -461,7 +470,7 @@ def _create_audit_rows(
             try:
                 supabase.table("audits").delete().eq("id", audit_id).execute()
             except Exception as cleanup_exc:
-                logger.error("Failed to roll back audit row %s: %s", audit_id, cleanup_exc)
+                logger.error("Failed to roll back audit row %s (%s)", audit_id, type(cleanup_exc).__name__)
         raise
 
 
@@ -469,7 +478,7 @@ def _delete_audit_rows(supabase: Any, audit_id: str) -> None:
     try:
         supabase.table("audits").delete().eq("id", audit_id).execute()
     except Exception as exc:
-        logger.error("Failed to clean up unscheduled audit %s: %s", audit_id, exc)
+        logger.error("Failed to clean up unscheduled audit %s (%s)", audit_id, type(exc).__name__)
 
 
 @router.post(
@@ -492,7 +501,7 @@ async def create_audit(
             current_user.id,
         )
     except Exception as exc:
-        logger.exception("Failed to authorize paper %s: %s", body.paper_id, exc)
+        logger.error("Failed to authorize paper %s (%s)", body.paper_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Paper service is temporarily unavailable.") from exc
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
@@ -500,7 +509,7 @@ async def create_audit(
     try:
         indexed = await asyncio.to_thread(_paper_has_indexed_chunks, supabase, body.paper_id)
     except Exception as exc:
-        logger.exception("Failed to verify paper index %s: %s", body.paper_id, exc)
+        logger.error("Failed to verify paper index %s (%s)", body.paper_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Paper index service is temporarily unavailable.") from exc
     if not indexed:
         raise HTTPException(
@@ -575,6 +584,32 @@ async def create_audit(
                 status_code=409,
                 detail="The comparison audit must share at least one selected round topic.",
             )
+    # Once admission starts it owns persistence, scheduling, and capacity.
+    # asyncio.to_thread work keeps running after cancellation, so shielding only
+    # the database call would still skip the subsequent scheduling/cleanup.
+    task = asyncio.create_task(
+        _admit_audit(body, current_user.id, effective_domain, service_supabase)
+    )
+    _admission_tasks.add(task)
+
+    def admission_finished(completed: asyncio.Task[AuditCreateResponse]) -> None:
+        _admission_tasks.discard(completed)
+        if not completed.cancelled():
+            # Retrieve a detached request's exception without emitting provider
+            # details or an unhandled-task traceback. Normal awaits still raise.
+            completed.exception()
+
+    task.add_done_callback(admission_finished)
+    return await asyncio.shield(task)
+
+
+async def _admit_audit(
+    body: AuditCreateRequest,
+    user_id: str,
+    effective_domain: str,
+    service_supabase: Any,
+) -> AuditCreateResponse:
+    """Finish a validated request's admission independently of its connection."""
     if not _audit_capacity.acquire(blocking=False):
         raise HTTPException(
             status_code=503,
@@ -592,7 +627,7 @@ async def create_audit(
             service_supabase,
             audit_id=audit_id,
             paper_id=body.paper_id,
-            user_id=current_user.id,
+            user_id=user_id,
             topics=body.round_topics,
             strictness_level=body.strictness_level,
             depth=body.depth,
@@ -601,7 +636,7 @@ async def create_audit(
         )
     except Exception as exc:
         _audit_capacity.release()
-        logger.exception("Failed to create audit records: %s", exc)
+        logger.error("Failed to create audit records (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="The audit could not be started. Please retry.") from exc
 
     loop = _event_loop or asyncio.get_running_loop()
@@ -623,7 +658,7 @@ async def create_audit(
         _event_hubs.pop(audit_id, None)
         _audit_capacity.release()
         await asyncio.to_thread(_delete_audit_rows, service_supabase, audit_id)
-        logger.exception("Failed to schedule audit %s: %s", audit_id, exc)
+        logger.error("Failed to schedule audit %s (%s)", audit_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="The audit worker is unavailable. Please retry.") from exc
 
     round_ids = [str(row["id"]) for row in round_rows]
@@ -674,17 +709,25 @@ async def list_audits(current_user: CurrentUser = Depends(get_current_user)):
         )
     )
     summaries: list[AuditSummaryResponse] = []
-    for row in result.data or []:
+    audit_rows = list(result.data or [])
+    topics_by_audit: dict[str, list[str]] = {}
+    # A topic plan has at most six rows. Batching 100 audits stays below
+    # PostgREST's usual 1,000-row cap without one round query per library item.
+    for start in range(0, len(audit_rows), _AUDIT_HISTORY_BATCH_SIZE):
+        audit_ids = [str(row["id"]) for row in audit_rows[start:start + _AUDIT_HISTORY_BATCH_SIZE]]
         rounds = await asyncio.to_thread(
-            lambda audit_id=row["id"]: (
+            lambda ids=audit_ids: (
                 supabase.table("rounds")
-                .select("topic")
-                .eq("audit_id", audit_id)
+                .select("audit_id, topic, round_number")
+                .in_("audit_id", ids)
                 .order("round_number")
                 .execute()
             )
         )
-        topics = [str(item["topic"]) for item in (rounds.data or [])]
+        for row in sorted(rounds.data or [], key=lambda item: int(item.get("round_number") or 0)):
+            topics_by_audit.setdefault(str(row["audit_id"]), []).append(str(row["topic"]))
+    for row in audit_rows:
+        topics = topics_by_audit.get(str(row["id"]), [])
         summaries.append(
             AuditSummaryResponse(
                 audit_id=str(row["id"]),
@@ -748,7 +791,7 @@ async def stream_audit(
             data = (
                 {"status": "completed"}
                 if event_type == "complete"
-                else {"status": "error", "message": audit.get("error_message") or "Audit failed"}
+                else {"status": "error", "message": _public_audit_error(audit.get("error_message"))}
             )
             yield {"id": "1", "event": event_type, "data": json.dumps(data)}
             return
@@ -811,7 +854,8 @@ def _load_turns(
     rounds = _load_round_rows(supabase, audit_id)
     if not rounds:
         return TurnsListResponse(
-            turns=[], verdicts=[], status=audit["status"], error_message=audit.get("error_message")
+            turns=[], verdicts=[], status=audit["status"],
+            error_message=_public_audit_error(audit.get("error_message")) if audit["status"] == "error" else None,
         )
 
     metadata = {
@@ -864,7 +908,7 @@ def _load_turns(
         turns=turns,
         verdicts=verdicts,
         status=str(audit["status"]),
-        error_message=audit.get("error_message"),
+        error_message=_public_audit_error(audit.get("error_message")) if audit["status"] == "error" else None,
     )
 
 
@@ -894,10 +938,10 @@ def _load_debriefs(
     )
     if audit is None:
         return None
-    if audit.get("status") == "error":
-        return [{"audit_error": True}]
-
-    rounds = _load_round_rows(supabase, audit_id)
+    # A later topic or synthesis failure does not invalidate a completed topic.
+    # Only completed rounds are eligible, even if a partial card was persisted
+    # before its round failed. The singular endpoint keeps its final-only gate.
+    rounds = [row for row in _load_round_rows(supabase, audit_id) if row.get("status") == "completed"]
     if not rounds:
         return []
     round_ids = [str(row["id"]) for row in rounds]
@@ -965,8 +1009,6 @@ async def _owned_debrief_rows(audit_id: str, current_user: CurrentUser) -> list[
     rows = await asyncio.to_thread(_load_debriefs, supabase, audit_id, current_user.id)
     if rows is None:
         raise HTTPException(status_code=404, detail="Audit not found")
-    if rows and rows[0].get("audit_error"):
-        raise HTTPException(status_code=409, detail="The audit failed and has no valid final result.")
     return rows
 
 
@@ -1149,6 +1191,26 @@ def _generate_version_diffs_as_service(
         return generate_version_diffs_for_audit(audit_id, compare_to)
 
 
+class _ModelWorkBusyError(RuntimeError):
+    """Another worker currently owns model-provider capacity."""
+
+
+def _generate_version_diffs_exclusively(
+    audit_id: str,
+    compare_to: str,
+    user_id: str,
+) -> list[dict[str, Any]]:
+    # Acquire and release in the same worker: cancelling an HTTP coroutine
+    # cannot stop to_thread work and must not release its provider lock early.
+    with_lock = _llm_work_lock
+    if not with_lock.acquire(blocking=False):
+        raise _ModelWorkBusyError()
+    try:
+        return _generate_version_diffs_as_service(audit_id, compare_to, user_id)
+    finally:
+        with_lock.release()
+
+
 @router.post(
     "/audits/{audit_id}/version-diffs",
     response_model=list[VersionDiffResponse],
@@ -1193,10 +1255,10 @@ async def retry_version_diffs(
         except ReportServiceError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
-            logger.exception(
-                "Failed to select a prior audit for version diff retry %s: %s",
+            logger.error(
+                "Failed to select a prior audit for version diff retry %s (%s)",
                 audit_id,
-                exc,
+                type(exc).__name__,
             )
             raise HTTPException(
                 status_code=503,
@@ -1227,21 +1289,21 @@ async def retry_version_diffs(
             detail="The comparison audit must be completed.",
         )
 
-    if not _llm_work_lock.acquire(blocking=False):
+    try:
+        rows = await asyncio.to_thread(
+            _generate_version_diffs_exclusively,
+            audit_id,
+            old_id,
+            current_user.id,
+        )
+    except _ModelWorkBusyError as exc:
         raise HTTPException(
             status_code=503,
             detail=(
                 "Another audit or comparison is using the model provider. "
                 "Please retry shortly."
             ),
-        )
-    try:
-        rows = await asyncio.to_thread(
-            _generate_version_diffs_as_service,
-            audit_id,
-            old_id,
-            current_user.id,
-        )
+        ) from exc
     except (FinalReportNotReadyError, VersionComparisonError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AuditNotFoundError as exc:
@@ -1249,18 +1311,15 @@ async def retry_version_diffs(
         # deletion without leaking whether a different user owns either UUID.
         raise HTTPException(status_code=404, detail="Audit not found") from exc
     except ReportServiceError as exc:
-        logger.warning("Version diff retry for audit %s failed: %s", audit_id, exc)
+        logger.warning("Version diff retry for audit %s failed (%s)", audit_id, type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail="Version comparison is temporarily unavailable.",
         ) from exc
     except Exception as exc:
-        logger.exception("Version diff retry for audit %s failed: %s", audit_id, exc)
+        logger.error("Version diff retry for audit %s failed (%s)", audit_id, type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail="Version comparison is temporarily unavailable.",
         ) from exc
-    finally:
-        _llm_work_lock.release()
-
     return [VersionDiffResponse(**row) for row in rows]

@@ -540,3 +540,41 @@ Validate lazily — only references the Attacker actually cites during a debate 
 5. Re-run the original resume upload (or an equivalent non-paper document) and confirm no external citation activity happens on it at all — it should be rejected by the Phase 3 relevance gate before ever reaching this code path.
 6. Confirm `missing_baseline` search no longer flags anything already present in the paper's own `reference_list`.
 7. Upload a paper with no detectable references section and confirm the audit still completes normally, just without `citation_integrity` critiques.
+
+
+## 23. Product overhaul — September 2026
+
+This working copy keeps the three-exchange evidence/defense/referee mechanism
+and adds a findings-first interface, public worked example, native controls,
+searchable reusable paper library, URL history and recovery, renewable PDF
+access, password recovery, JSON record export and browser print formatting.
+User-facing coverage/scrutiny names changed; existing wire values remain.
+
+Bibliography output is anchored to extracted source text. Retrieval has topic
+lenses and excludes prior-claim identifiers from query context. Exact repeated
+challenges fail validation. Source context for adjudication is bounded and
+explicitly marked when truncated. New turns retain model/prompt provenance and
+ruling-check metadata. New reports append a deterministic finding register;
+existing stored reports are not rewritten. Similarity and self-reported model
+confidence are expressly not calibrated scientific certainty.
+
+Reliability work covers cancellation/admission and comparison locks, completed
+partial-topic cards, private exception sanitization, auth-outage distinction,
+full-schema readiness with a 30-second cache, and bounded literature caching
+(256 entries, 900-second positive/60-second negative lifetime). Frontend
+runtime artifact guards reject malformed stream/snapshot content. History
+rounds are fetched in batches. No SQL migration was added in this local pass.
+
+Verification: 206 backend tests (205 pass, one opt-in live RLS skip), 23
+frontend tests, TypeScript/lint/build, and local synthetic browser journeys.
+The synthetic preview tests UI/transport only; its repeated illustrative
+findings do not measure reasoning quality.
+
+Remaining acceptance before monetization: a blinded expert-rated comparison
+with a strong single-model baseline; calibration and false-accusation metrics;
+real two-user RLS and provider-quota integration checks; per-account cost/usage
+limits; durable worker ownership and recovery; retention/deletion controls;
+and tested billing entitlements. This revisits the earlier decision in §18 to
+defer calibration indefinitely: credible paid claims require measured quality.
+Full claim-to-cited-source accuracy is still deferred. Multiple roles can share
+a model, so their disagreement must not be marketed as independent verification.

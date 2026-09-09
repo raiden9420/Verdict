@@ -117,16 +117,16 @@ def _rollback_ingestion(paper_id: str, storage_path: str, uploaded: bool) -> Non
     try:
         supabase.table("chunks").delete().eq("paper_id", paper_id).execute()
     except Exception as exc:
-        logger.error("Failed to roll back chunks for paper %s: %s", paper_id, exc)
+        logger.error("Failed to roll back chunks for paper %s (%s)", paper_id, type(exc).__name__)
     try:
         supabase.table("papers").delete().eq("id", paper_id).execute()
     except Exception as exc:
-        logger.error("Failed to roll back paper %s: %s", paper_id, exc)
+        logger.error("Failed to roll back paper %s (%s)", paper_id, type(exc).__name__)
     if uploaded:
         try:
             delete_pdf(storage_path)
         except Exception as exc:
-            logger.error("Failed to roll back stored PDF %s: %s", storage_path, exc)
+            logger.error("Failed to roll back stored PDF for paper %s (%s)", paper_id, type(exc).__name__)
 
 
 def _persist_ingestion(
@@ -300,7 +300,7 @@ async def upload_paper(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Failed to authorize parent paper %s: %s", parent_paper_id, exc)
+        logger.error("Failed to authorize parent paper (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail="Paper version service is temporarily unavailable.",
@@ -352,9 +352,8 @@ async def upload_paper(
     if not relevance.is_research_paper:
         if not force:
             logger.warning(
-                "Document relevance check rejected '%s': %s",
-                filename,
-                relevance.reason,
+                "Document relevance check rejected paper %s",
+                paper_id,
             )
             rejection = RelevanceRejectionDetail(
                 message=(
@@ -365,10 +364,8 @@ async def upload_paper(
             )
             raise HTTPException(status_code=400, detail=rejection.model_dump())
         logger.info(
-            "Research relevance gate explicitly overridden for '%s' after "
-            "a confirmed non-research classification: %s",
-            filename,
-            relevance.reason,
+            "Research relevance gate explicitly overridden for paper %s",
+            paper_id,
         )
 
     # Bibliography extraction is intentionally after the mandatory relevance
@@ -393,7 +390,7 @@ async def upload_paper(
             [chunk["text"] for chunk in chunks],
         )
     except EmbeddingServiceError as exc:
-        logger.error("Embedding failed for accepted upload '%s': %s", filename, exc)
+        logger.error("Embedding failed for accepted paper %s (%s)", paper_id, type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail={
@@ -463,12 +460,12 @@ async def upload_paper(
 
         await asyncio.to_thread(persist_as_backend)
     except Exception as exc:
-        logger.exception("Atomic ingestion failed for paper %s: %s", paper_id, exc)
+        logger.error("Ingestion failed for paper %s (%s)", paper_id, type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail={
                 "code": "ingestion_failed",
-                "message": "The document could not be saved. No audit data was retained; please retry.",
+                "message": "The document could not be saved completely. Please retry.",
                 "retryable": True,
             },
         ) from exc
@@ -561,7 +558,7 @@ async def _signed_pdf_for_user(
             current_user.id,
         )
     except Exception as exc:
-        logger.exception("Failed to authorize PDF %s: %s", paper_id, exc)
+        logger.error("Failed to authorize PDF %s (%s)", paper_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="PDF service is temporarily unavailable.") from exc
     if not storage_path:
         # Do not reveal whether another account owns the UUID.
@@ -570,7 +567,7 @@ async def _signed_pdf_for_user(
     try:
         return await asyncio.to_thread(_create_signed_pdf_url, storage_path, supabase)
     except Exception as exc:
-        logger.exception("Failed to sign PDF URL for %s: %s", paper_id, exc)
+        logger.error("Failed to sign PDF URL for %s (%s)", paper_id, type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail="PDF service is temporarily unavailable.",

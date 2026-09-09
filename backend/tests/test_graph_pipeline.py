@@ -699,7 +699,7 @@ class GraphPipelineTests(unittest.TestCase):
                             "REJECTED ATTEMPT" if self.attack_count == 1
                             else f"Accepted critique {self.attack_count - 1}"
                         ),
-                        "critique_text": "The stated proof assumption lacks sufficient justification.",
+                        "critique_text": f"The proof assumption for case {self.attack_count} lacks sufficient justification.",
                         "cited_chunk_ids": [CHUNK_ID],
                         "external_citations": [],
                         "critique_type": "unstated_assumption",
@@ -811,12 +811,17 @@ class GraphPipelineTests(unittest.TestCase):
         class NoReferencesLLM(LLMClient):
             model_name = "no-references-test-provider"
 
+            def __init__(self):
+                self.attack_count = 0
+
             def generate(self, system_prompt: str, user_prompt: str) -> dict:
                 if "You are the Attacker" in system_prompt:
                     self.assert_no_integrity_instruction(user_prompt)
+                    self.attack_count += 1
+                    procedure = ("sample selection", "outlier exclusion", "randomization")[self.attack_count - 1]
                     return {
-                        "claim_summary": "The selection procedure is not described.",
-                        "critique_text": "The paper omits its sample-selection procedure.",
+                        "claim_summary": f"The {procedure} procedure is not described.",
+                        "critique_text": f"The reviewed evidence does not describe {procedure}.",
                         "cited_chunk_ids": [],
                         "cited_reference_id": None,
                         "external_citations": [],

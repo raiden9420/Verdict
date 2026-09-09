@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import copy
 import io
+import json
 import sys
+import threading
 import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Request, UploadFile
 from fastapi.testclient import TestClient
+from supabase_auth.errors import AuthApiError
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -230,7 +233,7 @@ class ProtectedEndpointTests(unittest.TestCase):
 
     def test_expired_bearer_token_is_401_at_the_http_boundary(self) -> None:
         auth = Mock()
-        auth.get_user.side_effect = RuntimeError("expired JWT internals")
+        auth.get_user.side_effect = AuthApiError("expired JWT internals", 401, "bad_jwt")
         with patch(
             "app.api.dependencies.get_anon_supabase",
             return_value=SimpleNamespace(auth=auth),
@@ -244,8 +247,133 @@ class ProtectedEndpointTests(unittest.TestCase):
         self.assertEqual(response.headers.get("www-authenticate"), "Bearer")
         self.assertNotIn("expired JWT internals", response.text)
 
+    def test_auth_outage_is_503_at_the_http_boundary(self) -> None:
+        auth = Mock()
+        auth.get_user.side_effect = TimeoutError("private provider response")
+        with patch(
+            "app.api.dependencies.get_anon_supabase",
+            return_value=SimpleNamespace(auth=auth),
+        ):
+            response = TestClient(app).get(
+                "/papers", headers={"Authorization": "Bearer valid-token"},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers.get("retry-after"), "5")
+        self.assertNotIn("www-authenticate", response.headers)
+        self.assertNotIn("private provider response", response.text)
+
 
 class AuditCreationContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_response_loss_after_audit_insert_still_compensates_owned_row(self) -> None:
+        database = SupabaseStub()
+        original_table = database.table
+
+        def table_with_lost_insert_response(name):
+            query = original_table(name)
+            original_execute = query.execute
+
+            def execute():
+                result = original_execute()
+                if name == "audits" and query.pending_insert is not None:
+                    raise TimeoutError("insert response lost")
+                return result
+
+            query.execute = execute
+            return query
+
+        with (
+            patch.object(database, "table", side_effect=table_with_lost_insert_response),
+            self.assertRaises(TimeoutError),
+        ):
+            audits._create_audit_rows(
+                database, audit_id=AUDIT_ID, paper_id=PAPER_ID, user_id=USER_ID,
+                topics=["theoretical_soundness"], strictness_level="standard",
+                depth="fast", mode="author", domain="other",
+            )
+        self.assertEqual(database.tables["audits"], [])
+
+    async def test_cancelled_request_still_finishes_admission_without_leaking_capacity(self) -> None:
+        body = AuditCreateRequest(paper_id=PAPER_ID, round_topics=["theoretical_soundness"])
+        entered = threading.Event()
+        finish = threading.Event()
+        rows = [{"id": ROUND_1_ID, "round_number": 1, "topic": "theoretical_soundness"}]
+        capacity = Mock()
+        capacity.acquire.return_value = True
+        executor = Mock()
+
+        def create_rows(*_args, **_kwargs):
+            entered.set()
+            if not finish.wait(5):
+                raise TimeoutError("test did not release admission")
+            return rows
+
+        with (
+            patch.object(audits, "get_user_supabase", return_value=object()),
+            patch.object(audits, "get_service_supabase", return_value=object()),
+            patch.object(audits, "_load_owned_paper", return_value={"id": PAPER_ID, "detected_domain": "other"}),
+            patch.object(audits, "_paper_has_indexed_chunks", return_value=True),
+            patch.object(audits, "_create_audit_rows", side_effect=create_rows),
+            patch.object(audits, "_audit_capacity", capacity),
+            patch.object(audits, "_audit_executor", executor),
+        ):
+            request = asyncio.create_task(audits.create_audit(body, current_user()))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                request.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+                self.assertEqual(len(audits._admission_tasks), 1)
+                executor.submit.assert_not_called()
+                capacity.release.assert_not_called()
+            finally:
+                finish.set()
+            admitted = await asyncio.gather(*list(audits._admission_tasks))
+            await asyncio.sleep(0)
+
+        executor.submit.assert_called_once()
+        capacity.release.assert_not_called()  # the queued worker now owns it
+        self.assertEqual(audits._admission_tasks, set())
+        self.assertEqual(admitted[0].round_ids, [ROUND_1_ID])
+        audits._event_hubs.pop(admitted[0].audit_id, None)
+
+    async def test_detached_admission_failure_releases_capacity(self) -> None:
+        body = AuditCreateRequest(paper_id=PAPER_ID, round_topics=["theoretical_soundness"])
+        entered = threading.Event()
+        finish = threading.Event()
+        capacity = Mock()
+        capacity.acquire.return_value = True
+
+        def fail_rows(*_args, **_kwargs):
+            entered.set()
+            finish.wait(5)
+            raise RuntimeError("private database details")
+
+        with (
+            patch.object(audits, "get_user_supabase", return_value=object()),
+            patch.object(audits, "get_service_supabase", return_value=object()),
+            patch.object(audits, "_load_owned_paper", return_value={"id": PAPER_ID, "detected_domain": "other"}),
+            patch.object(audits, "_paper_has_indexed_chunks", return_value=True),
+            patch.object(audits, "_create_audit_rows", side_effect=fail_rows),
+            patch.object(audits, "_audit_capacity", capacity),
+            patch.object(audits, "_audit_executor", Mock()) as executor,
+        ):
+            request = asyncio.create_task(audits.create_audit(body, current_user()))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                request.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+            finally:
+                finish.set()
+            failures = await asyncio.gather(*list(audits._admission_tasks), return_exceptions=True)
+            await asyncio.sleep(0)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], HTTPException)
+        self.assertEqual(failures[0].status_code, 503)
+        capacity.release.assert_called_once()
+        executor.submit.assert_not_called()
+        self.assertEqual(audits._admission_tasks, set())
+
     def test_row_creation_persists_one_audit_and_one_ordered_round_per_topic(self) -> None:
         database = SupabaseStub()
         topics = ["theoretical_soundness", "experimental_setup", "reproducibility"]
@@ -662,12 +790,41 @@ class MultiTopicOuterRunnerTests(unittest.IsolatedAsyncioTestCase):
             mark_error.call_args.args[1],
             [ROUND_1_ID, ROUND_2_ID, third_round["id"]],
         )
-        self.assertEqual(mark_error.call_args.args[2], "provider exhausted")
+        self.assertEqual(mark_error.call_args.args[2], audits._AUDIT_FAILURE_MESSAGE)
         self.assertEqual(
             [event.type for event in audits._event_hubs[AUDIT_ID].history],
             ["round_start", "round_start", "audit_error"],
         )
         capacity.release.assert_called_once()
+
+    async def test_raw_exception_and_callback_details_never_reach_logs_or_clients(self) -> None:
+        private = "Bearer private-provider-token private-paper-text"
+
+        def fail(_paper, _round, _topic, callback):
+            callback({"type": "error", "data": {"message": private}})
+            raise RuntimeError(private)
+
+        database = SupabaseStub({
+            "audits": [{"id": AUDIT_ID, "status": "in_progress"}],
+            "rounds": copy.deepcopy(self.rows),
+        })
+        with (
+            patch.object(audits, "run_audit", side_effect=fail),
+            patch.object(audits, "_audit_capacity", Mock()),
+            self.assertLogs(audits.logger, level="ERROR") as logs,
+        ):
+            await asyncio.to_thread(
+                audits._run_audit_job,
+                audit_id=AUDIT_ID,
+                paper_id=PAPER_ID,
+                round_rows=self.rows,
+                user_supabase=database,
+                loop=asyncio.get_running_loop(),
+            )
+            await asyncio.sleep(0)
+        self.assertNotIn(private, " ".join(logs.output))
+        self.assertEqual(database.tables["audits"][0]["error_message"], audits._AUDIT_FAILURE_MESSAGE)
+        self.assertEqual(list(audits._event_hubs[AUDIT_ID].history)[-1].data["message"], audits._AUDIT_FAILURE_MESSAGE)
 
     async def test_optional_version_diff_failure_does_not_invalidate_final_report(self) -> None:
         database = SupabaseStub(
@@ -791,6 +948,32 @@ class MultiTopicOuterRunnerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProductReadApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_library_batches_topic_plans_and_preserves_owner_scope(self) -> None:
+        audit_rows = [
+            {"id": str(uuid.UUID(int=index + 300)), "user_id": USER_ID,
+             "paper_id": PAPER_ID, "status": "completed", "created_at": "2026-08-12"}
+            for index in range(205)
+        ]
+        round_rows = [
+            {"audit_id": row["id"], "round_number": number, "topic": topic}
+            for row in audit_rows
+            for number, topic in [(2, "experimental_setup"), (1, "theoretical_soundness")]
+        ]
+        foreign_id = str(uuid.uuid4())
+        database = SupabaseStub({
+            "audits": [*audit_rows, {"id": foreign_id, "user_id": OTHER_USER_ID}],
+            "rounds": [*round_rows, {"audit_id": foreign_id, "round_number": 1, "topic": "novelty_scope"}],
+        })
+        with (
+            patch.object(audits, "get_user_supabase", return_value=database),
+            patch.object(database, "table", wraps=database.table) as tables,
+        ):
+            response = await audits.list_audits(current_user())
+        self.assertEqual(len(response), 205)
+        self.assertTrue(all(row.round_topics == ["theoretical_soundness", "experimental_setup"] for row in response))
+        self.assertEqual(tables.call_args_list.count(call("rounds")), 3)
+        self.assertEqual(tables.call_args_list.count(call("audits")), 1)
+
     def database(self) -> SupabaseStub:
         return SupabaseStub(
             {
@@ -915,7 +1098,9 @@ class ProductReadApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_singular_debrief_waits_for_whole_multi_topic_audit(self) -> None:
         database = self.database()
         database.tables["audits"][0]["status"] = "in_progress"
-        database.tables["rounds"][0]["status"] = "in_progress"
+        for row in database.tables["rounds"]:
+            if row["id"] == ROUND_2_ID:
+                row["status"] = "in_progress"
         database.tables["debrief_cards"] = [
             row
             for row in database.tables["debrief_cards"]
@@ -932,6 +1117,37 @@ class ProductReadApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(partial[0].round_topic, "theoretical_soundness")
         self.assertEqual(raised.exception.status_code, 404)
         self.assertEqual(raised.exception.detail, "Debrief card not yet generated.")
+
+    async def test_later_failure_retains_only_completed_topic_cards(self) -> None:
+        database = self.database()
+        database.tables["audits"][0]["status"] = "error"
+        for row in database.tables["rounds"]:
+            if row["id"] == ROUND_2_ID:
+                row["status"] = "error"
+        with patch.object(audits, "get_user_supabase", return_value=database):
+            cards = await audits.get_debriefs(AUDIT_ID, current_user())
+            with self.assertRaises(HTTPException) as raised:
+                await audits.get_debrief(AUDIT_ID, current_user())
+        self.assertEqual([card.id for card in cards], ["card-1"])
+        self.assertEqual(raised.exception.status_code, 409)
+
+    async def test_polling_sanitizes_legacy_raw_error_messages(self) -> None:
+        database = self.database()
+        database.tables["audits"][0].update({"status": "error", "error_message": "private-provider-token"})
+        with patch.object(audits, "get_user_supabase", return_value=database):
+            response = await audits.list_turns(AUDIT_ID, current_user())
+        self.assertEqual(response.error_message, audits._AUDIT_FAILURE_MESSAGE)
+
+    async def test_stream_recovery_sanitizes_legacy_raw_error_messages(self) -> None:
+        database = self.database()
+        database.tables["audits"][0].update({"status": "error", "error_message": "private-provider-token"})
+        with patch.object(audits, "get_user_supabase", return_value=database):
+            response = await audits.stream_audit(
+                AUDIT_ID, Request({"type": "http", "headers": []}), current_user(),
+            )
+            events = [event async for event in response.body_iterator]
+        self.assertEqual(events[0]["event"], "audit_error")
+        self.assertEqual(json.loads(events[0]["data"])["message"], audits._AUDIT_FAILURE_MESSAGE)
 
     async def test_turns_and_verdicts_include_round_identity_in_outer_order(self) -> None:
         database = self.database()
@@ -1070,6 +1286,50 @@ class ProductReadApiTests(unittest.IsolatedAsyncioTestCase):
 class VersionDiffRetryApiTests(unittest.IsolatedAsyncioTestCase):
     old_paper_id = "00000000-0000-4000-8000-000000000221"
     other_root_id = "00000000-0000-4000-8000-000000000222"
+
+    async def test_cancellation_keeps_provider_lock_until_background_work_finishes(self) -> None:
+        entered = threading.Event()
+        finish = threading.Event()
+        released = threading.Event()
+
+        class RecordingLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+
+            def acquire(self, blocking=False):
+                return self.lock.acquire(blocking=blocking)
+
+            def release(self):
+                self.lock.release()
+                released.set()
+
+        lock = RecordingLock()
+
+        def generate(*_args):
+            entered.set()
+            if not finish.wait(5):
+                raise TimeoutError("test did not release provider work")
+            return []
+
+        with (
+            patch.object(audits, "get_user_supabase", return_value=self.user_database()),
+            patch.object(audits, "_generate_version_diffs_as_service", side_effect=generate),
+            patch.object(audits, "_llm_work_lock", lock),
+        ):
+            request = asyncio.create_task(audits.retry_version_diffs(AUDIT_ID, OLD_AUDIT_ID, current_user()))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                request.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+                self.assertTrue(lock.lock.locked())
+                with self.assertRaises(HTTPException) as raised:
+                    await audits.retry_version_diffs(AUDIT_ID, OLD_AUDIT_ID, current_user())
+                self.assertEqual(raised.exception.status_code, 503)
+            finally:
+                finish.set()
+            self.assertTrue(await asyncio.to_thread(released.wait, 5))
+            self.assertFalse(lock.lock.locked())
 
     def user_database(
         self,
